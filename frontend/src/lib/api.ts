@@ -259,8 +259,20 @@ export interface ScrapedCar {
   url?: string
 }
 
-export async function getFeed(limit = 10): Promise<ScrapedCar[]> {
-  return request<ScrapedCar[]>(`/api/scrape/feed?limit=${limit}`)
+export interface FeedFilters {
+  q?: string
+  year?: number
+  color?: string
+  car_type?: string
+}
+
+export async function getFeed(limit = 10, filters: FeedFilters = {}): Promise<ScrapedCar[]> {
+  const params = new URLSearchParams({ limit: String(limit) })
+  if (filters.q) params.set('q', filters.q)
+  if (filters.year) params.set('year', String(filters.year))
+  if (filters.color) params.set('color', filters.color)
+  if (filters.car_type) params.set('car_type', filters.car_type)
+  return request<ScrapedCar[]>(`/api/scrape/feed?${params}`)
 }
 
 export async function scrapeSearch(q: string, prefer: 'chw' | 'wiki' = 'chw'): Promise<ScrapedCar[]> {

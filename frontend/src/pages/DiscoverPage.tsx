@@ -1,14 +1,14 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ChevronLeft, ChevronRight, Loader2, ImageIcon, RefreshCw,
-  CheckCircle2, Check, X, ExternalLink, Layers, Pencil, BookmarkPlus,
-  BookmarkCheck, ChevronsRight, Flame,
+  CheckCircle2, Check, X, ExternalLink, Layers, BookmarkPlus,
+  BookmarkCheck, ChevronsRight, Search, ChevronDown,
 } from 'lucide-react'
 import {
   getFeed, scrapeCar, createCar,
   addToCollection as apiAddToCollection,
   getAllSeries, createSeries,
-  type ScrapedCar, type ScrapedVersion,
+  type ScrapedCar, type ScrapedVersion, type FeedFilters,
 } from '../lib/api'
 import { useToastContext } from '../contexts/ToastContext'
 import type { Series } from '../types'
@@ -19,11 +19,28 @@ type VersionEdit = {
   year?: string
   color?: string
   series_name?: string
-  th?: 'none' | 'th' | 'sth'
   set_number?: string
   series_number?: string
   toy_number?: string
   car_type?: string
+}
+
+const SERIES_TYPES = [
+  { value: 'mainline', label: 'Mainline' },
+  { value: 'premium', label: 'Premium' },
+  { value: 'collector', label: 'Collector' },
+  { value: 'treasure hunt', label: 'TH' },
+  { value: 'super treasure hunt', label: 'Super TH' },
+] as const
+
+// Auto-infer series type from series name keywords
+function inferSeriesType(name: string): string | null {
+  const n = name.toLowerCase()
+  if (/car culture|boulevard|pop culture|fast.{0,3}furious|hw exotics|hw premium|retro entertainment|detroit muscle|speed machines|pantone|hw id\b/i.test(n)) return 'premium'
+  if (/\bcollector\b|rlc|red line club|hw collector/i.test(n)) return 'collector'
+  if (/\bsuper treasure hunt\b|super th\b/i.test(n)) return 'super treasure hunt'
+  if (/\btreasure hunt\b|\bth\b/i.test(n)) return 'treasure hunt'
+  return null
 }
 
 // ── Version approve row ───────────────────────────────────────────────────────
@@ -40,6 +57,7 @@ function VersionApproveRow({
   onEditChange,
   onApprove,
   onSkip,
+  allSeries,
 }: {
   castingImageUrl?: string
   version: ScrapedVersion | null
@@ -52,20 +70,40 @@ function VersionApproveRow({
   onEditChange: (patch: Partial<VersionEdit>) => void
   onApprove: () => void
   onSkip: () => void
+  allSeries: Series[]
 }) {
   const [imgErr, setImgErr] = useState(false)
+  const [showSeriesPicker, setShowSeriesPicker] = useState(false)
+  const seriesPickerRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => setImgErr(false), [version?.photo_url, castingImageUrl])
 
-  // Resolve display values: edits override scraped data
+  // Close picker on outside click
+  useEffect(() => {
+    if (!showSeriesPicker) return
+    const handler = (e: MouseEvent) => {
+      if (seriesPickerRef.current && !seriesPickerRef.current.contains(e.target as Node)) {
+        setShowSeriesPicker(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [showSeriesPicker])
+
   const year = edit.year !== undefined ? edit.year : version?.year
   const color = edit.color !== undefined ? edit.color : version?.color
   const series = edit.series_name !== undefined ? edit.series_name : version?.series_name
-  const th = edit.th ?? 'none'
-  const carType = th === 'sth' ? 'super treasure hunt' : th === 'th' ? 'treasure hunt' : (version?.car_type || 'mainline')
+  const carType = edit.car_type ?? version?.car_type ?? 'mainline'
   const photo = version?.photo_url || castingImageUrl
+
+  const seriesQuery = (series || '').toLowerCase()
+  const filteredSeries = allSeries.filter(s =>
+    !seriesQuery || s.name.toLowerCase().includes(seriesQuery)
+  ).slice(0, 30)
 
   if (state === 'skipped') return null
 
+  // Compact row — always shown
   return (
     <div className={`
       rounded-xl border transition-all overflow-hidden
@@ -75,21 +113,34 @@ function VersionApproveRow({
         ? 'border-hw-accent/40 bg-hw-accent/5'
         : 'border-hw-border bg-hw-surface'}
     `}>
-      {/* Main row */}
+
+      {/* ── Compact row ── */}
       <div className="flex items-center gap-3 p-3">
-        {/* Thumbnail */}
-        <div className="w-14 h-14 rounded-lg bg-zinc-900 flex-shrink-0 overflow-hidden border border-hw-border">
+
+        {/* Thumbnail — click to expand */}
+        <button
+          onClick={state === 'idle' ? onEditToggle : undefined}
+          className={`w-12 h-12 rounded-lg bg-zinc-900 flex-shrink-0 overflow-hidden border transition-colors ${
+            state === 'idle' ? 'cursor-pointer hover:border-hw-accent/50' : 'cursor-default'
+          } border-hw-border`}
+          tabIndex={state === 'idle' ? 0 : -1}
+          title="Click to expand"
+        >
           {photo && !imgErr ? (
             <img src={photo} alt="" className="w-full h-full object-contain" onError={() => setImgErr(true)} loading="lazy" />
           ) : (
             <div className="w-full h-full flex items-center justify-center">
-              <ImageIcon className="w-5 h-5 text-hw-muted/30" />
+              <ImageIcon className="w-4 h-4 text-hw-muted/30" />
             </div>
           )}
-        </div>
+        </button>
 
-        {/* Info */}
-        <div className="min-w-0 flex-1">
+        {/* Info — click to expand */}
+        <button
+          onClick={state === 'idle' ? onEditToggle : undefined}
+          className={`min-w-0 flex-1 text-left ${state === 'idle' ? 'cursor-pointer' : 'cursor-default'}`}
+          tabIndex={-1}
+        >
           <div className="flex items-center gap-1.5 flex-wrap">
             {year ? (
               <span className="text-sm font-bold text-hw-text">{year}</span>
@@ -97,7 +148,7 @@ function VersionApproveRow({
               <span className="text-sm text-hw-muted italic">No year</span>
             )}
             {carType !== 'mainline' && (
-              <span className={`text-[9px] font-bold px-1 py-0.5 rounded border leading-none ${
+              <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border leading-none ${
                 carType === 'super treasure hunt'
                   ? 'bg-yellow-900/40 text-yellow-300 border-yellow-600/30'
                   : carType === 'premium'
@@ -111,7 +162,7 @@ function VersionApproveRow({
           {(edit.toy_number ?? version?.toy_number) && (
             <p className="text-[10px] text-hw-muted/60 font-mono mt-0.5">{edit.toy_number ?? version?.toy_number}</p>
           )}
-        </div>
+        </button>
 
         {/* Actions */}
         {state === 'added' ? (
@@ -120,7 +171,6 @@ function VersionApproveRow({
           <Loader2 className="w-4 h-4 text-hw-muted animate-spin flex-shrink-0" />
         ) : (
           <div className="flex items-center gap-1 flex-shrink-0">
-            {/* Collection toggle */}
             <button
               onClick={onToggleCollection}
               title={addToCollection ? 'Will add to collection' : 'Add to catalog only'}
@@ -133,44 +183,14 @@ function VersionApproveRow({
               {addToCollection ? <BookmarkCheck className="w-3.5 h-3.5" /> : <BookmarkPlus className="w-3.5 h-3.5" />}
             </button>
 
-            {/* TH toggle */}
-            {carType !== 'premium' && (
-              <button
-                onClick={() => onEditChange({ th: th === 'none' ? 'th' : 'none' })}
-                title="Treasure Hunt"
-                className={`w-7 h-7 rounded-lg border flex items-center justify-center transition-colors ${
-                  th !== 'none'
-                    ? 'border-yellow-600/50 bg-yellow-900/40 text-yellow-300'
-                    : 'border-hw-border text-hw-muted hover:border-yellow-700/40 hover:text-yellow-400/60'
-                }`}
-              >
-                <Flame className="w-3.5 h-3.5" />
-              </button>
-            )}
-
-            {/* Edit toggle */}
-            <button
-              onClick={onEditToggle}
-              title="Edit fields"
-              className={`w-7 h-7 rounded-lg border flex items-center justify-center transition-colors ${
-                isEditing
-                  ? 'border-hw-accent/50 bg-hw-accent/10 text-hw-accent'
-                  : 'border-hw-border text-hw-muted hover:border-hw-muted'
-              }`}
-            >
-              <Pencil className="w-3.5 h-3.5" />
-            </button>
-
-            {/* Approve */}
             <button
               onClick={onApprove}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-hw-accent text-white text-xs font-semibold hover:bg-hw-orange transition-colors"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-hw-accent text-white text-xs font-semibold hover:bg-hw-accent-hover transition-colors"
             >
               <Check className="w-3 h-3" />
               Add
             </button>
 
-            {/* Skip */}
             <button
               onClick={onSkip}
               className="w-7 h-7 rounded-lg border border-hw-border text-hw-muted hover:border-red-800/60 hover:text-red-400 hover:bg-red-900/20 transition-colors flex items-center justify-center"
@@ -182,109 +202,170 @@ function VersionApproveRow({
         )}
       </div>
 
-      {/* TH/STH picker */}
-      {th !== 'none' && state === 'idle' && (
-        <div className="px-3 pb-2 pt-1 border-t border-yellow-900/30 bg-yellow-950/20 flex items-center gap-2">
-          <Flame className="w-3 h-3 text-yellow-500 flex-shrink-0" />
-          <span className="text-[10px] text-yellow-400/70 font-medium mr-1">Type:</span>
-          {(['th', 'sth'] as const).map(t => (
-            <button
-              key={t}
-              onClick={() => onEditChange({ th: t })}
-              className={`px-2.5 py-1 rounded text-[10px] font-bold border transition-colors ${
-                th === t
-                  ? 'bg-yellow-900/60 text-yellow-200 border-yellow-600/50'
-                  : 'border-hw-border/60 text-hw-muted hover:border-yellow-700/40 hover:text-yellow-400/70'
-              }`}
-            >
-              {t === 'sth' ? 'Super TH' : 'Regular TH'}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {/* Inline edit panel */}
+      {/* ── Expanded panel ── */}
       {isEditing && state === 'idle' && (
-        <div className="px-3 pb-3 border-t border-hw-border/50 pt-3 space-y-2">
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-[10px] text-hw-muted mb-1 block">Year</label>
-              <input
-                type="number"
-                placeholder={String(version?.year ?? '2024')}
-                value={edit.year ?? (version?.year ? String(version.year) : '')}
-                onChange={e => onEditChange({ year: e.target.value })}
-                className="input-field py-1.5 text-sm"
+        <div className="border-t border-hw-border/50">
+
+          {/* Large image */}
+          <div className="relative bg-zinc-950" style={{ height: '200px' }}>
+            {photo && !imgErr ? (
+              <img
+                src={photo}
+                alt=""
+                className="w-full h-full object-contain"
+                onError={() => setImgErr(true)}
               />
-            </div>
-            <div>
-              <label className="text-[10px] text-hw-muted mb-1 block">Color</label>
-              <input
-                type="text"
-                placeholder={version?.color ?? 'Color'}
-                value={edit.color ?? (version?.color ?? '')}
-                onChange={e => onEditChange({ color: e.target.value })}
-                className="input-field py-1.5 text-sm"
-              />
-            </div>
-            <div className="col-span-2">
-              <label className="text-[10px] text-hw-muted mb-1 block">Series</label>
-              <input
-                type="text"
-                placeholder={version?.series_name ?? 'Series name'}
-                value={edit.series_name ?? (version?.series_name ?? '')}
-                onChange={e => onEditChange({ series_name: e.target.value })}
-                className="input-field py-1.5 text-sm"
-              />
-            </div>
-            {['mainline', 'treasure hunt', 'super treasure hunt'].includes(carType) && (
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <ImageIcon className="w-12 h-12 text-zinc-800" />
+              </div>
+            )}
+            {/* Close button */}
+            <button
+              onClick={onEditToggle}
+              className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/60 backdrop-blur-sm border border-white/10 flex items-center justify-center text-white/70 hover:text-white hover:bg-black/80 transition-colors"
+              title="Collapse"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Edit fields */}
+          <div className="px-3 pb-3 pt-3 space-y-2.5">
+            <div className="grid grid-cols-2 gap-2">
               <div>
-                <label className="text-[10px] text-hw-muted mb-1 block">Mainline # (of 250)</label>
+                <label className="text-[10px] text-hw-muted mb-1 block">Year</label>
                 <input
                   type="number"
-                  placeholder={version?.set_number ? String(version.set_number) : 'e.g. 127'}
-                  value={edit.set_number ?? (version?.set_number ? String(version.set_number) : '')}
-                  onChange={e => onEditChange({ set_number: e.target.value })}
+                  placeholder={String(version?.year ?? '2024')}
+                  value={edit.year ?? (version?.year ? String(version.year) : '')}
+                  onChange={e => onEditChange({ year: e.target.value })}
                   className="input-field py-1.5 text-sm"
                 />
               </div>
-            )}
+              <div>
+                <label className="text-[10px] text-hw-muted mb-1 block">Color</label>
+                <input
+                  type="text"
+                  placeholder={version?.color ?? 'Color'}
+                  value={edit.color ?? (version?.color ?? '')}
+                  onChange={e => onEditChange({ color: e.target.value })}
+                  className="input-field py-1.5 text-sm"
+                />
+              </div>
+              <div className="col-span-2" ref={seriesPickerRef}>
+                <label className="text-[10px] text-hw-muted mb-1 block">Series</label>
+                <div className="relative flex gap-1">
+                  <input
+                    type="text"
+                    placeholder={version?.series_name ?? 'Series name'}
+                    value={edit.series_name ?? (version?.series_name ?? '')}
+                    onChange={e => {
+                      const val = e.target.value
+                      const inferred = inferSeriesType(val)
+                      onEditChange({ series_name: val, ...(inferred ? { car_type: inferred } : {}) })
+                    }}
+                    onFocus={() => setShowSeriesPicker(true)}
+                    className="input-field py-1.5 text-sm flex-1 min-w-0"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowSeriesPicker(v => !v)}
+                    className={`w-8 flex-shrink-0 rounded-lg border flex items-center justify-center transition-colors ${
+                      showSeriesPicker
+                        ? 'border-hw-accent/50 bg-hw-accent/10 text-hw-accent'
+                        : 'border-hw-border text-hw-muted hover:border-hw-accent/40 hover:text-hw-accent'
+                    }`}
+                  >
+                    <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSeriesPicker ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showSeriesPicker && filteredSeries.length > 0 && (
+                    <div className="absolute top-full left-0 right-0 mt-1 bg-hw-bg border border-hw-border rounded-xl shadow-2xl z-50 max-h-44 overflow-y-auto">
+                      {filteredSeries.map(s => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onMouseDown={e => e.preventDefault()}
+                          onClick={() => {
+                            const inferred = inferSeriesType(s.name)
+                            onEditChange({ series_name: s.name, car_type: inferred ?? s.type ?? 'mainline' })
+                            setShowSeriesPicker(false)
+                          }}
+                          className="w-full text-left px-3 py-2 text-xs text-hw-text hover:bg-hw-accent/10 transition-colors flex items-center justify-between gap-2"
+                        >
+                          <span className="truncate">{s.name}</span>
+                          {s.type && s.type !== 'mainline' && (
+                            <span className="text-[9px] text-hw-muted flex-shrink-0">{s.type}</span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+              {['mainline', 'treasure hunt', 'super treasure hunt'].includes(carType) && (
+                <div>
+                  <label className="text-[10px] text-hw-muted mb-1 block">Mainline # (of 250)</label>
+                  <input
+                    type="number"
+                    placeholder={version?.set_number ? String(version.set_number) : 'e.g. 127'}
+                    value={edit.set_number ?? (version?.set_number ? String(version.set_number) : '')}
+                    onChange={e => onEditChange({ set_number: e.target.value })}
+                    className="input-field py-1.5 text-sm"
+                  />
+                </div>
+              )}
+              <div>
+                <label className="text-[10px] text-hw-muted mb-1 block">Series pos (e.g. 1/10)</label>
+                <input
+                  type="number"
+                  placeholder={version?.series_number ? String(version.series_number) : 'e.g. 1'}
+                  value={edit.series_number ?? (version?.series_number ? String(version.series_number) : '')}
+                  onChange={e => onEditChange({ series_number: e.target.value })}
+                  className="input-field py-1.5 text-sm"
+                />
+              </div>
+            </div>
+
+            {/* Series type selector */}
             <div>
-              <label className="text-[10px] text-hw-muted mb-1 block">Series pos (e.g. 1/10)</label>
+              <label className="text-[10px] text-hw-muted mb-1.5 block">Series type</label>
+              <div className="flex flex-wrap gap-1.5">
+                {SERIES_TYPES.map(({ value, label }) => (
+                  <button
+                    key={value}
+                    onClick={() => onEditChange({ car_type: value })}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                      carType === value
+                        ? value === 'super treasure hunt'
+                          ? 'bg-yellow-900/60 text-yellow-200 border-yellow-600/50'
+                          : value === 'treasure hunt'
+                          ? 'bg-yellow-900/40 text-yellow-300 border-yellow-700/40'
+                          : value === 'premium'
+                          ? 'bg-amber-900/40 text-amber-300 border-amber-700/40'
+                          : value === 'collector'
+                          ? 'bg-violet-900/40 text-violet-300 border-violet-700/40'
+                          : 'bg-hw-accent/15 text-hw-accent border-hw-accent/30'
+                        : 'border-hw-border text-hw-muted hover:border-hw-muted hover:text-hw-text'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="text-[10px] text-hw-muted mb-1 block">Toy Number</label>
               <input
-                type="number"
-                placeholder={version?.series_number ? String(version.series_number) : 'e.g. 1'}
-                value={edit.series_number ?? (version?.series_number ? String(version.series_number) : '')}
-                onChange={e => onEditChange({ series_number: e.target.value })}
-                className="input-field py-1.5 text-sm"
+                type="text"
+                placeholder="e.g. DHP27"
+                value={edit.toy_number ?? (version?.toy_number ?? '')}
+                onChange={e => onEditChange({ toy_number: e.target.value.toUpperCase() })}
+                className="input-field py-1.5 text-sm uppercase"
+                maxLength={10}
               />
             </div>
-          </div>
-          <div>
-            <label className="text-[10px] text-hw-muted mb-1 block">Car Type</label>
-            <select
-              value={edit.car_type ?? (version?.car_type || 'mainline')}
-              onChange={e => onEditChange({ car_type: e.target.value })}
-              className="input-field py-1.5 text-sm"
-            >
-              <option value="mainline">Mainline</option>
-              <option value="premium">Premium</option>
-              <option value="collector">Collector</option>
-              <option value="treasure hunt">Treasure Hunt</option>
-              <option value="super treasure hunt">Super Treasure Hunt</option>
-            </select>
-            <p className="text-[10px] text-hw-muted/60 mt-0.5">TH/STH toggle above overrides this</p>
-          </div>
-          <div>
-            <label className="text-[10px] text-hw-muted mb-1 block">Toy Number (e.g. DHP27)</label>
-            <input
-              type="text"
-              placeholder="e.g. DHP27"
-              value={edit.toy_number ?? (version?.toy_number ?? '')}
-              onChange={e => onEditChange({ toy_number: e.target.value.toUpperCase() })}
-              className="input-field py-1.5 text-sm uppercase"
-              maxLength={10}
-            />
           </div>
         </div>
       )}
@@ -304,6 +385,9 @@ export function DiscoverPage() {
   const [cards, setCards] = useState<ScrapedCar[]>([])
   const [currentIdx, setCurrentIdx] = useState(0)
   const [loadingFeed, setLoadingFeed] = useState(false)
+  const [feedError, setFeedError] = useState<string | null>(null)
+  // Ref-based guard: prevents stale-closure double-calls
+  const loadingRef = useRef(false)
 
   // Wiki detail for current casting
   const [castingDetail, setCastingDetail] = useState<ScrapedCar | null>(null)
@@ -313,16 +397,21 @@ export function DiscoverPage() {
   // Series cache
   const [allSeries, setAllSeries] = useState<Series[]>([])
 
-  // Per-item approve state, keyed by `${castingIdx}:${versionIdx|"casting"}`
+  // Per-item approve state
   const [itemStates, setItemStates] = useState<Record<string, ItemState>>({})
-
-  // Per-version edits and collection flags
   const [versionEdits, setVersionEdits] = useState<Record<string, VersionEdit>>({})
   const [versionCollect, setVersionCollect] = useState<Record<string, boolean>>({})
   const [editingKey, setEditingKey] = useState<string | null>(null)
-
-  // Global "add to collection" default
   const [shouldAddToCollection, setShouldAddToCollection] = useState(true)
+
+  // Filters — draft state (what's in the inputs)
+  const [filterQ, setFilterQ] = useState('')
+  const [filterYear, setFilterYear] = useState('')
+  const [filterColor, setFilterColor] = useState('')
+  const [filterType, setFilterType] = useState('')
+  // Active filters (committed on Search)
+  const [activeFilters, setActiveFilters] = useState<FeedFilters>({})
+  const activeFiltersRef = useRef<FeedFilters>({})
 
   const touchStartX = useRef(0)
 
@@ -330,17 +419,20 @@ export function DiscoverPage() {
     getAllSeries().then(setAllSeries).catch(() => {})
   }, [])
 
-  // ── Feed ──────────────────────────────────────────────────────────────────
+  // ── Feed loading (ref-guarded, no stale closure issues) ───────────────────
 
-  const loadMore = useCallback(async () => {
-    if (loadingFeed) return
+  const loadBatch = useCallback(async (filters: FeedFilters, replace: boolean) => {
+    if (loadingRef.current) return
+    loadingRef.current = true
     setLoadingFeed(true)
+    setFeedError(null)
     try {
-      const batch = await getFeed(10)
+      const batch = await getFeed(10, filters)
       setCards(prev => {
-        const existingIds = new Set(prev.map(c => c.collecthw_id).filter(Boolean))
+        const base = replace ? [] : prev
+        const existingIds = new Set(base.map(c => c.collecthw_id).filter(Boolean))
         return [
-          ...prev,
+          ...base,
           ...batch.filter(c =>
             !existingIds.has(c.collecthw_id) &&
             !c.in_db &&
@@ -348,18 +440,63 @@ export function DiscoverPage() {
           ),
         ]
       })
-    } catch {
-      toast.error('Failed to load feed')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : ''
+      if (msg.includes('No cars found') || msg.includes('404')) {
+        setFeedError('No cars found for those filters.')
+      } else {
+        toast.error('Failed to load feed')
+      }
     } finally {
+      loadingRef.current = false
       setLoadingFeed(false)
     }
-  }, [loadingFeed, toast])
+  }, [toast])
 
-  useEffect(() => { loadMore() }, [])
+  // Initial load
+  useEffect(() => { loadBatch({}, false) }, [])
 
+  // Auto-load more as user pages through
   useEffect(() => {
-    if (cards.length > 0 && currentIdx >= cards.length - 3 && !loadingFeed) loadMore()
-  }, [currentIdx, cards.length, loadingFeed])
+    if (cards.length > 0 && currentIdx >= cards.length - 3) {
+      loadBatch(activeFiltersRef.current, false)
+    }
+  }, [currentIdx, cards.length])
+
+  // ── Apply / clear filters ─────────────────────────────────────────────────
+
+  const handleSearch = () => {
+    const filters: FeedFilters = {}
+    if (filterQ.trim()) filters.q = filterQ.trim()
+    if (filterYear) filters.year = Number(filterYear)
+    if (filterColor.trim()) filters.color = filterColor.trim()
+    if (filterType) filters.car_type = filterType
+    activeFiltersRef.current = filters
+    setActiveFilters(filters)
+    setCards([])
+    setCurrentIdx(0)
+    setItemStates({})
+    setVersionEdits({})
+    setVersionCollect({})
+    loadBatch(filters, true)
+  }
+
+  const handleClearFilters = () => {
+    setFilterQ('')
+    setFilterYear('')
+    setFilterColor('')
+    setFilterType('')
+    activeFiltersRef.current = {}
+    setActiveFilters({})
+    setCards([])
+    setCurrentIdx(0)
+    setItemStates({})
+    setVersionEdits({})
+    setVersionCollect({})
+    loadBatch({}, true)
+  }
+
+  const hasActiveFilters = Object.values(activeFilters).some(v => v !== undefined && v !== '')
 
   // ── Wiki detail ──────────────────────────────────────────────────────────
 
@@ -371,13 +508,48 @@ export function DiscoverPage() {
     setVersionEdits({})
     setVersionCollect({})
     setEditingKey(null)
-    if (!current?.url) return
+
+    if (!current) return
+
+    // CHW filtered result: no wiki URL, but card already carries year/color/type.
+    // Pre-populate the single-entry edit so data shows up immediately.
+    if (!current.url) {
+      const preEdit: VersionEdit = {}
+      if (current.year) preEdit.year = String(current.year)
+      if (current.primary_color) preEdit.color = current.primary_color
+      if (current.car_type) preEdit.car_type = current.car_type
+      setVersionEdits({ [`${currentIdx}:casting`]: preEdit })
+      // Provide a minimal castingDetail so the approve row renders
+      setCastingDetail({ ...current, versions: [] })
+      return
+    }
+
+    // Wiki result: scrape for all versions
     setDetailLoading(true)
     scrapeCar(current.url)
-      .then(d => setCastingDetail(d))
+      .then(d => {
+        // If a year filter is active, pin year-matching versions to the top
+        const yr = activeFiltersRef.current.year
+        if (yr && d.versions?.length) {
+          d = {
+            ...d,
+            versions: [
+              ...d.versions.filter(v => v.year === yr),
+              ...d.versions.filter(v => v.year !== yr),
+            ],
+          }
+        }
+        setCastingDetail(d)
+        // Use the year-matching version's photo when available, otherwise the casting image
+        const yearMatchPhoto = yr ? d.versions?.find(v => v.year === yr)?.photo_url : null
+        const imageToCache = yearMatchPhoto || d.image_url
+        if (imageToCache) {
+          setCards(prev => prev.map((c, i) => i === currentIdx ? { ...c, image_url: imageToCache } : c))
+        }
+      })
       .catch(() => {})
       .finally(() => setDetailLoading(false))
-  }, [current?.url])
+  }, [currentIdx, current?.collecthw_id])
 
   // ── Navigation ───────────────────────────────────────────────────────────
 
@@ -401,13 +573,8 @@ export function DiscoverPage() {
   const getVersionData = (key: string, version: ScrapedVersion | null) => {
     const e = versionEdits[key] || {}
     const seriesName = e.series_name !== undefined ? e.series_name : version?.series_name
-    const th = e.th ?? 'none'
-
-    // Derive car_type: explicit edit > TH/STH > series type > scraped
     let car_type: string
-    if (th === 'sth') car_type = 'super treasure hunt'
-    else if (th === 'th') car_type = 'treasure hunt'
-    else if (e.car_type) car_type = e.car_type
+    if (e.car_type) car_type = e.car_type
     else {
       const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
       const seriesMatch = seriesName ? allSeries.find(s => norm(s.name) === norm(seriesName)) : undefined
@@ -419,12 +586,8 @@ export function DiscoverPage() {
       color: e.color !== undefined ? e.color : version?.color,
       series_name: seriesName,
       car_type,
-      set_number: e.set_number !== undefined
-        ? (e.set_number ? Number(e.set_number) : undefined)
-        : version?.set_number,
-      series_number: e.series_number !== undefined
-        ? (e.series_number ? Number(e.series_number) : undefined)
-        : version?.series_number,
+      set_number: e.set_number !== undefined ? (e.set_number ? Number(e.set_number) : undefined) : version?.set_number,
+      series_number: e.series_number !== undefined ? (e.series_number ? Number(e.series_number) : undefined) : version?.series_number,
       toy_number: e.toy_number !== undefined ? (e.toy_number || undefined) : (version?.toy_number || undefined),
       photo_url: version?.photo_url,
       series_total: version?.series_total,
@@ -448,16 +611,11 @@ export function DiscoverPage() {
           series_id = match.id
         } else {
           try {
-            // Infer series type from series name keywords
             const lower = (vd.series_name || '').toLowerCase()
             const isCollectorSeries = /\bcollector\b|rlc|red line club|hw collector/i.test(lower)
             const isPremiumSeries = /car culture|boulevard|pop culture|fast[ &]furious|hw exotics|hw premium/i.test(lower)
             const seriesType = isCollectorSeries ? 'collector' : isPremiumSeries ? 'premium' : 'mainline'
-            const ns = await createSeries({
-              name: vd.series_name,
-              type: seriesType,
-              total_count: (vd as any).series_total,
-            })
+            const ns = await createSeries({ name: vd.series_name, type: seriesType, total_count: (vd as any).series_total })
             series_id = ns.id
             setAllSeries(prev => [...prev, ns])
           } catch { /* non-critical */ }
@@ -496,9 +654,7 @@ export function DiscoverPage() {
       ? displayVersions.map((v, i) => ({ key: itemKey(i), v }))
       : [{ key: itemKey('casting'), v: null as ScrapedVersion | null }]
     const toAdd = rows.filter(({ key }) => (itemStates[key] ?? 'idle') === 'idle')
-    for (const { key, v } of toAdd) {
-      await handleApprove(key, v)
-    }
+    for (const { key, v } of toAdd) await handleApprove(key, v)
   }
 
   const setVersionEdit = (key: string, patch: Partial<VersionEdit>) => {
@@ -506,10 +662,7 @@ export function DiscoverPage() {
   }
 
   const toggleCollect = (key: string) => {
-    setVersionCollect(prev => ({
-      ...prev,
-      [key]: !(prev[key] ?? shouldAddToCollection),
-    }))
+    setVersionCollect(prev => ({ ...prev, [key]: !(prev[key] ?? shouldAddToCollection) }))
   }
 
   // ── Derived state ─────────────────────────────────────────────────────────
@@ -525,64 +678,166 @@ export function DiscoverPage() {
   })
 
   const idleCount = (versions.length > 0 ? displayVersions : [null])
-    .filter((_, i) => {
-      const key = itemKey(versions.length > 0 ? i : 'casting')
-      return (itemStates[key] ?? 'idle') === 'idle'
-    }).length
-
-  // ── Skeleton ──────────────────────────────────────────────────────────────
-
-  if (!cards.length && loadingFeed) {
-    return (
-      <div className="p-4 md:p-6 max-w-xl mx-auto space-y-4">
-        <div>
-          <h1 className="text-2xl font-bold text-hw-text">Discover</h1>
-          <p className="text-hw-text-secondary text-sm mt-0.5">Loading random Hot Wheels…</p>
-        </div>
-        <div className="rounded-2xl bg-hw-surface border border-hw-border animate-pulse h-48" />
-        {[1, 2, 3].map(i => (
-          <div key={i} className="rounded-xl bg-hw-surface border border-hw-border animate-pulse h-16" />
-        ))}
-      </div>
-    )
-  }
+    .filter((_, i) => (itemStates[itemKey(versions.length > 0 ? i : 'casting')] ?? 'idle') === 'idle').length
 
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-4 md:p-6 max-w-xl mx-auto">
+    <div className="p-4 md:p-6 max-w-xl mx-auto pb-12">
 
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
+      {/* ── Header ── */}
+      <div className="flex items-start justify-between mb-4">
         <div>
           <h1 className="text-2xl font-bold text-hw-text">Discover</h1>
-          <p className="text-hw-text-secondary text-sm mt-0.5">Random castings from the Hot Wheels wiki</p>
+          <p className="text-hw-muted text-xs mt-0.5">
+            {hasActiveFilters ? 'Filtered · CollectHW' : 'Random · Hot Wheels wiki'}
+          </p>
         </div>
         <button
-          onClick={() => { setCards([]); setCurrentIdx(0); setCastingDetail(null); setItemStates({}); setVersionEdits({}); setVersionCollect({}); loadMore() }}
+          onClick={() => { setCards([]); setCurrentIdx(0); setCastingDetail(null); setItemStates({}); loadBatch(activeFiltersRef.current, true) }}
           disabled={loadingFeed}
-          className="btn-secondary py-1.5 px-3 text-sm disabled:opacity-50"
+          className="btn-secondary py-1.5 px-3 text-sm disabled:opacity-50 mt-0.5"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loadingFeed ? 'animate-spin' : ''}`} />
-          New batch
+          Refresh
         </button>
       </div>
 
+      {/* ── Filter bar ── */}
+      <div className="mb-5 space-y-2">
+        {/* Row 1: keyword */}
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-hw-muted pointer-events-none" />
+          <input
+            type="text"
+            placeholder="Search by name… Camaro, Porsche, BMW"
+            value={filterQ}
+            onChange={e => setFilterQ(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSearch()}
+            className="input-field pl-8 py-2 text-sm"
+          />
+        </div>
+
+        {/* Row 2: year · color · type · button */}
+        <div className="flex gap-2">
+          <input
+            type="number"
+            placeholder="Year"
+            value={filterYear}
+            onChange={e => setFilterYear(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSearch()}
+            className="input-field py-2 text-sm w-24 shrink-0"
+            min={1968}
+            max={new Date().getFullYear() + 1}
+          />
+          <input
+            type="text"
+            placeholder="Color"
+            value={filterColor}
+            onChange={e => setFilterColor(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && handleSearch()}
+            className="input-field py-2 text-sm min-w-0"
+          />
+          <select
+            value={filterType}
+            onChange={e => setFilterType(e.target.value)}
+            className="input-field py-2 text-sm w-36 shrink-0"
+          >
+            <option value="">Any type</option>
+            <option value="mainline">Mainline</option>
+            <option value="premium">Premium</option>
+            <option value="treasure hunt">Treasure Hunt</option>
+            <option value="super treasure hunt">Super TH</option>
+            <option value="collector">Collector</option>
+          </select>
+          <button
+            onClick={handleSearch}
+            disabled={loadingFeed}
+            className="btn-primary py-2 px-3 shrink-0 disabled:opacity-50"
+          >
+            {loadingFeed
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <Search className="w-3.5 h-3.5" />
+            }
+          </button>
+        </div>
+
+        {/* Active filter chips */}
+        {hasActiveFilters && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {activeFilters.q && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-hw-accent/10 border border-hw-accent/20 text-hw-accent text-xs font-medium">
+                "{activeFilters.q}"
+              </span>
+            )}
+            {activeFilters.year && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-hw-accent/10 border border-hw-accent/20 text-hw-accent text-xs font-medium">
+                {activeFilters.year}
+              </span>
+            )}
+            {activeFilters.color && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-hw-accent/10 border border-hw-accent/20 text-hw-accent text-xs font-medium">
+                {activeFilters.color}
+              </span>
+            )}
+            {activeFilters.car_type && (
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-hw-accent/10 border border-hw-accent/20 text-hw-accent text-xs font-medium">
+                {activeFilters.car_type}
+              </span>
+            )}
+            <button onClick={handleClearFilters} className="text-[11px] text-hw-muted hover:text-hw-text transition-colors ml-1">
+              Clear
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Loading skeleton ── */}
+      {!cards.length && loadingFeed && (
+        <div className="space-y-3">
+          <div className="rounded-2xl bg-hw-surface border border-hw-border animate-pulse h-52" />
+          {[1, 2, 3].map(i => (
+            <div key={i} className="rounded-xl bg-hw-surface border border-hw-border animate-pulse h-14" />
+          ))}
+        </div>
+      )}
+
+      {/* ── Empty / error ── */}
+      {!cards.length && !loadingFeed && (
+        <div className="text-center py-16">
+          {feedError ? (
+            <>
+              <p className="text-hw-muted text-sm">{feedError}</p>
+              <button onClick={handleClearFilters} className="mt-3 btn-secondary text-sm">
+                Clear filters
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-hw-muted text-sm">No more cars in this batch.</p>
+              <button onClick={() => loadBatch(activeFiltersRef.current, true)} className="mt-3 btn-primary">
+                <RefreshCw className="w-4 h-4" />
+                Load batch
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {current && (
         <>
-          {/* Progress dots */}
+          {/* ── Progress ── */}
           <div className="flex items-center justify-between mb-3">
             <span className="text-xs text-hw-muted tabular-nums">
-              {currentIdx + 1}
-              <span className="text-hw-border"> / {cards.length}{loadingFeed ? '+' : ''}</span>
+              {currentIdx + 1} <span className="text-hw-border">/ {cards.length}{loadingFeed ? '+' : ''}</span>
             </span>
             <div className="flex items-center gap-1">
-              {cards.slice(0, 12).map((_, i) => (
+              {cards.slice(0, 14).map((_, i) => (
                 <button
                   key={i}
                   onClick={() => setCurrentIdx(i)}
-                  className={`rounded-full transition-all duration-200 ${
-                    i === currentIdx ? 'w-5 h-1.5 bg-hw-accent' : 'w-1.5 h-1.5 bg-hw-border hover:bg-hw-muted'
+                  className={`rounded-full transition-all duration-150 ${
+                    i === currentIdx ? 'w-4 h-1.5 bg-hw-accent' : 'w-1.5 h-1.5 bg-hw-border hover:bg-hw-muted'
                   }`}
                 />
               ))}
@@ -590,9 +845,9 @@ export function DiscoverPage() {
             </div>
           </div>
 
-          {/* Casting card + arrows */}
+          {/* ── Casting hero card ── */}
           <div
-            className="flex items-center gap-2 mb-4"
+            className="relative mb-4"
             onTouchStart={e => { touchStartX.current = e.touches[0].clientX }}
             onTouchEnd={e => {
               const d = touchStartX.current - e.changedTouches[0].clientX
@@ -600,32 +855,50 @@ export function DiscoverPage() {
               else if (d < -60) goPrev()
             }}
           >
+            {/* Prev / Next buttons float over the card */}
             <button
-              onClick={goPrev} disabled={currentIdx === 0}
-              className="flex-shrink-0 w-9 h-9 rounded-full bg-hw-surface border border-hw-border flex items-center justify-center disabled:opacity-20 hover:bg-hw-surface-hover transition-colors"
+              onClick={goPrev}
+              disabled={currentIdx === 0}
+              className="absolute left-2 top-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full bg-black/50 backdrop-blur-sm border border-white/10 flex items-center justify-center disabled:opacity-20 hover:bg-black/70 transition-colors"
             >
-              <ChevronLeft className="w-4 h-4" />
+              <ChevronLeft className="w-4 h-4 text-white" />
+            </button>
+            <button
+              onClick={goNext}
+              disabled={currentIdx === cards.length - 1 && !loadingFeed}
+              className="absolute right-2 top-1/2 -translate-y-1/2 z-10 w-8 h-8 rounded-full bg-black/50 backdrop-blur-sm border border-white/10 flex items-center justify-center disabled:opacity-20 hover:bg-black/70 transition-colors"
+            >
+              <ChevronRight className="w-4 h-4 text-white" />
             </button>
 
-            <div className="flex-1 min-w-0 rounded-2xl overflow-hidden border border-hw-border shadow-xl relative" style={{ height: '180px' }}>
+            <div className="rounded-2xl overflow-hidden border border-hw-border shadow-xl" style={{ height: '220px' }}>
               {current.image_url ? (
                 <img src={current.image_url} alt={current.name} className="w-full h-full object-contain bg-zinc-950" />
               ) : (
                 <div className="w-full h-full bg-zinc-950 flex items-center justify-center">
-                  <ImageIcon className="w-10 h-10 text-zinc-700" />
+                  <ImageIcon className="w-12 h-12 text-zinc-800" />
                 </div>
               )}
-              <div className="absolute inset-0 pointer-events-none" style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 55%)' }} />
-              <div className="absolute bottom-0 left-0 right-0 p-3 flex items-end justify-between">
+
+              {/* Gradient overlay */}
+              <div className="absolute inset-0 pointer-events-none rounded-2xl" style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.88) 0%, rgba(0,0,0,0.1) 50%, transparent 100%)' }} />
+
+              {/* Bottom info */}
+              <div className="absolute bottom-0 left-0 right-0 p-4 flex items-end justify-between">
                 <div className="min-w-0">
-                  <h2 className="text-base font-bold text-white leading-tight truncate">{current.name}</h2>
+                  <h2 className="text-lg font-bold text-white leading-tight">{current.name}</h2>
+                  {(current.year || current.primary_color) && (
+                    <p className="text-xs text-white/60 mt-0.5">
+                      {[current.year, current.primary_color].filter(Boolean).join(' · ')}
+                    </p>
+                  )}
                 </div>
                 {current.url && (
                   <a
                     href={current.url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex-shrink-0 ml-2 flex items-center gap-1 text-[10px] text-white/50 hover:text-white/80 transition-colors"
+                    className="flex-shrink-0 ml-2 flex items-center gap-1 text-[10px] text-white/40 hover:text-white/70 transition-colors"
                   >
                     <ExternalLink className="w-3 h-3" />
                     wiki
@@ -633,60 +906,48 @@ export function DiscoverPage() {
                 )}
               </div>
             </div>
-
-            <button
-              onClick={goNext} disabled={currentIdx === cards.length - 1 && !loadingFeed}
-              className="flex-shrink-0 w-9 h-9 rounded-full bg-hw-surface border border-hw-border flex items-center justify-center disabled:opacity-20 hover:bg-hw-surface-hover transition-colors"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
           </div>
 
-          {/* Global "add to collection" default toggle */}
-          <div className="flex items-center justify-between px-4 py-2.5 rounded-xl bg-hw-surface border border-hw-border mb-4">
-            <div>
-              <span className="text-sm text-hw-text font-medium">Default: add to collection</span>
-              <p className="text-[11px] text-hw-muted mt-0.5">Toggle per-version using the bookmark icon</p>
+          {/* ── Controls row ── */}
+          <div className="flex items-center justify-between px-1 mb-3">
+            {/* Add to collection toggle */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setShouldAddToCollection(p => !p)}
+                className={`relative w-9 h-5 rounded-full transition-colors duration-200 flex-shrink-0 ${shouldAddToCollection ? 'bg-hw-accent' : 'bg-hw-border'}`}
+              >
+                <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${shouldAddToCollection ? 'translate-x-4' : 'translate-x-0'}`} />
+              </button>
+              <span className="text-xs text-hw-muted">Add to collection</span>
             </div>
-            <button
-              onClick={() => setShouldAddToCollection(p => !p)}
-              className={`relative w-11 h-6 rounded-full transition-colors duration-200 flex-shrink-0 ${shouldAddToCollection ? 'bg-hw-accent' : 'bg-hw-border'}`}
-            >
-              <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform duration-200 ${shouldAddToCollection ? 'translate-x-5' : 'translate-x-0'}`} />
-            </button>
-          </div>
 
-          {/* Versions / approve list */}
-          <div className="space-y-2">
-            {/* Header */}
-            <div className="flex items-center justify-between px-1">
-              <div className="flex items-center gap-2">
+            {/* Versions count + Add all */}
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-1.5">
                 <Layers className="w-3.5 h-3.5 text-hw-muted" />
                 {detailLoading ? (
-                  <span className="text-xs text-hw-muted flex items-center gap-1.5">
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                    Loading versions…
-                  </span>
+                  <Loader2 className="w-3 h-3 text-hw-muted animate-spin" />
                 ) : versions.length > 0 ? (
-                  <span className="text-xs text-hw-muted">{versions.length} versions</span>
+                  <span className="text-xs text-hw-muted">{versions.length}</span>
                 ) : castingDetail ? (
-                  <span className="text-xs text-hw-muted">No version table — adding as single entry</span>
+                  <span className="text-xs text-hw-muted">1</span>
                 ) : null}
               </div>
 
-              {/* Add All button */}
               {!detailLoading && castingDetail && idleCount > 1 && (
                 <button
                   onClick={handleAddAll}
-                  className="flex items-center gap-1 text-xs text-hw-accent hover:text-hw-orange transition-colors font-medium"
+                  className="flex items-center gap-1 text-xs text-hw-accent hover:text-hw-accent-hover transition-colors font-medium"
                 >
                   <ChevronsRight className="w-3.5 h-3.5" />
                   Add all ({idleCount})
                 </button>
               )}
             </div>
+          </div>
 
-            {/* Rows */}
+          {/* ── Version rows ── */}
+          <div className="space-y-2">
             {versions.length > 0 ? (
               <>
                 {displayVersions.map((v, i) => {
@@ -705,6 +966,7 @@ export function DiscoverPage() {
                       onEditChange={patch => setVersionEdit(key, patch)}
                       onApprove={() => handleApprove(key, v)}
                       onSkip={() => handleSkip(key)}
+                      allSeries={allSeries}
                     />
                   )
                 })}
@@ -712,13 +974,17 @@ export function DiscoverPage() {
                 {!showAllVersions && hiddenCount > 0 && (
                   <button
                     onClick={() => setShowAllVersions(true)}
-                    className="w-full py-2 text-xs text-hw-accent hover:text-hw-orange transition-colors"
+                    className="w-full py-2 text-xs text-hw-accent hover:text-hw-accent-hover transition-colors"
                   >
                     Show {hiddenCount} more versions
                   </button>
                 )}
               </>
-            ) : !detailLoading && castingDetail ? (
+            ) : detailLoading ? (
+              <div className="space-y-2">
+                {[1, 2].map(i => <div key={i} className="rounded-xl bg-hw-surface border border-hw-border animate-pulse h-14" />)}
+              </div>
+            ) : castingDetail ? (
               (() => {
                 const key = itemKey('casting')
                 return (
@@ -734,16 +1000,17 @@ export function DiscoverPage() {
                     onEditChange={patch => setVersionEdit(key, patch)}
                     onApprove={() => handleApprove(key, null)}
                     onSkip={() => handleSkip(key)}
+                    allSeries={allSeries}
                   />
                 )
               })()
             ) : null}
           </div>
 
-          {/* Next casting prompt */}
+          {/* ── Footer nav ── */}
           <div className="mt-5 flex items-center justify-between">
             {allResolved && (
-              <span className="text-xs text-emerald-400 font-medium">All done for this casting!</span>
+              <span className="text-xs text-emerald-400 font-medium">All done!</span>
             )}
             <button
               onClick={goNext}
@@ -755,18 +1022,8 @@ export function DiscoverPage() {
             </button>
           </div>
 
-          <p className="text-center text-[11px] text-hw-muted/50 mt-3">← → keys · swipe on mobile</p>
+          <p className="text-center text-[11px] text-hw-muted/40 mt-4">← → keys · swipe on mobile</p>
         </>
-      )}
-
-      {!current && !loadingFeed && (
-        <div className="text-center py-16 text-hw-muted">
-          <p className="text-sm">No more cars in this batch.</p>
-          <button onClick={() => { setCards([]); setCurrentIdx(0); loadMore() }} className="mt-3 btn-primary">
-            <RefreshCw className="w-4 h-4" />
-            Load new batch
-          </button>
-        </div>
       )}
     </div>
   )

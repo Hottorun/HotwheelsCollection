@@ -884,16 +884,161 @@ async def _wiki_random(client: httpx.AsyncClient, limit: int = 50) -> list[dict]
     return results
 
 
-@app.get("/api/scrape/feed")
-async def scrape_feed(limit: int = 10, user=Depends(get_current_user)):
-    """Return truly random Hot Wheels castings from the wiki random-page API."""
-    n = min(limit, 20)
+async def _wiki_by_year(client: httpx.AsyncClient, year: int, limit: int = 50) -> list[dict]:
+    """Fetch Hot Wheels castings from a specific year using wiki category pages."""
+    # The wiki organises releases into year categories — try common name formats
+    candidate_categories = [
+        f"{year}_Hot_Wheels",
+        f"Hot_Wheels_{year}",
+        f"{year}_Mainline_Hot_Wheels",
+    ]
 
-    async with httpx.AsyncClient() as client:
-        pool = await _wiki_random(client, limit=max(n * 5, 50))
+    pages: list[dict] = []
+    for cat in candidate_categories:
+        try:
+            resp = await client.get(
+                f"{WIKI_BASE}/api.php",
+                params={
+                    "action": "query",
+                    "list": "categorymembers",
+                    "cmtitle": f"Category:{cat}",
+                    "cmlimit": str(min(limit * 4, 500)),
+                    "cmtype": "page",
+                    "format": "json",
+                },
+                headers=HEADERS,
+                timeout=10,
+            )
+            members = resp.json().get("query", {}).get("categorymembers", [])
+            car_pages = [m for m in members if _is_casting_title(m.get("title", ""))]
+            if car_pages:
+                pages = car_pages
+                break
+        except Exception:
+            continue
+
+    if not pages:
+        return []
+
+    # Batch-fetch thumbnails
+    page_ids_str = "|".join(str(p["pageid"]) for p in pages[:limit * 3])
+    try:
+        img_resp = await client.get(
+            f"{WIKI_BASE}/api.php",
+            params={"action": "query", "pageids": page_ids_str,
+                    "prop": "pageimages", "pithumbsize": "300", "format": "json"},
+            headers=HEADERS,
+            timeout=10,
+        )
+        img_pages = img_resp.json().get("query", {}).get("pages", {})
+    except Exception:
+        img_pages = {}
+
+    results = []
+    for p in pages[:limit * 3]:
+        title = p["title"]
+        pid = str(p["pageid"])
+        thumb = img_pages.get(pid, {}).get("thumbnail", {})
+        results.append({
+            "collecthw_id": f"wiki_{pid}",
+            "name": title,
+            "year": year,
+            "series_name": None,
+            "primary_color": None,
+            "image_url": thumb.get("source") if thumb else None,
+            "treasure_hunt": False,
+            "car_type": "mainline",
+            "series_number": None,
+            "set_number": None,
+            "barcode": None,
+            "versions": [],
+            "in_db": False,
+            "url": f"{WIKI_BASE}/wiki/{quote(title.replace(' ', '_'))}",
+        })
+    return results
+
+
+@app.get("/api/scrape/feed")
+async def scrape_feed(
+    limit: int = 10,
+    q: Optional[str] = None,
+    year: Optional[int] = None,
+    color: Optional[str] = None,
+    car_type: Optional[str] = None,
+    user=Depends(get_current_user),
+):
+    """Return Hot Wheels castings.
+    No filters → random wiki castings.
+    Year only → wiki category for that year (reliable year browsing).
+    Other filters → CollectHW text search + server-side filtering.
+    """
+    n = min(limit, 50)
+    use_filters = any(v is not None and v != "" for v in [q, year, color, car_type])
+
+    if not use_filters:
+        async with httpx.AsyncClient() as client:
+            pool = await _wiki_random(client, limit=max(n * 5, 50))
+
+    elif year and not q and not color and not car_type:
+        # Year-only: use wiki category — most reliable for year browsing
+        async with httpx.AsyncClient() as client:
+            pool = await _wiki_by_year(client, year, limit=max(n * 3, 30))
+
+    elif q and not color and not car_type:
+        # Name search (with optional year): wiki search for reliable thumbnails + wiki URLs
+        async with httpx.AsyncClient() as client:
+            pool = await _wiki_search(client, q.strip(), limit=max(n * 3, 30))
+            if not pool:
+                pool = await _chw_search_cached(client, q.strip())
+        if year:
+            pool = [c for c in pool if c.get("year") == year]
+
+    else:
+        # Color / car_type (and optional q/year) → CHW text search + post-filter
+        query_parts = []
+        if q:
+            query_parts.append(q.strip())
+        if color:
+            query_parts.append(color.strip())
+        # Don't include year in CHW text query — it doesn't match year fields
+        search_q = " ".join(query_parts) if query_parts else "hot wheels"
+
+        async with httpx.AsyncClient() as client:
+            pool = await _chw_search_cached(client, search_q)
+
+        if year:
+            pool = [c for c in pool if c.get("year") == year]
+        if color:
+            cl = color.lower()
+            pool = [c for c in pool if cl in (c.get("primary_color") or "").lower()]
+        if car_type:
+            ct = car_type.lower()
+            pool = [c for c in pool if (c.get("car_type") or "").lower() == ct]
+
+        # CHW images are hotlink-protected — supplement with wiki thumbnails for items
+        # that have no image_url or whose collecthw image may not load in the browser.
+        if pool:
+            missing = [c for c in pool if not c.get("image_url")]
+            if missing:
+                try:
+                    names_to_lookup = list({c["name"] for c in missing if c.get("name")})[:10]
+                    async with httpx.AsyncClient() as client2:
+                        wiki_results: list[dict] = []
+                        for name in names_to_lookup:
+                            wr = await _wiki_search(client2, name, limit=1)
+                            wiki_results.extend(wr)
+                    wiki_by_name = {w["name"].lower(): w for w in wiki_results}
+                    for c in missing:
+                        wm = wiki_by_name.get((c.get("name") or "").lower())
+                        if wm and wm.get("image_url"):
+                            c["image_url"] = wm["image_url"]
+                        if wm and wm.get("url") and not c.get("url"):
+                            c["url"] = wm["url"]
+                except Exception:
+                    pass
 
     if not pool:
-        raise HTTPException(status_code=503, detail="Feed temporarily unavailable")
+        raise HTTPException(status_code=404, detail="No cars found matching those filters")
 
     # Mark cars whose name already exists in the DB
     try:

@@ -985,13 +985,13 @@ async def scrape_feed(
             pool = await _wiki_by_year(client, year, limit=max(n * 3, 30))
 
     elif q and not color and not car_type:
-        # Name search (with optional year): wiki search for reliable thumbnails + wiki URLs
+        # Name search: wiki search for reliable thumbnails + wiki URLs.
+        # Wiki results are casting-level (no year field), so don't filter by year here —
+        # the year filter is applied in the version detail view (pins matching versions to top).
         async with httpx.AsyncClient() as client:
             pool = await _wiki_search(client, q.strip(), limit=max(n * 3, 30))
             if not pool:
                 pool = await _chw_search_cached(client, q.strip())
-        if year:
-            pool = [c for c in pool if c.get("year") == year]
 
     else:
         # Color / car_type (and optional q/year) → CHW text search + post-filter

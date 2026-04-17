@@ -402,7 +402,7 @@ export function DiscoverPage() {
   const [versionEdits, setVersionEdits] = useState<Record<string, VersionEdit>>({})
   const [versionCollect, setVersionCollect] = useState<Record<string, boolean>>({})
   const [editingKey, setEditingKey] = useState<string | null>(null)
-  const [shouldAddToCollection, setShouldAddToCollection] = useState(true)
+  const [shouldAddToCollection, setShouldAddToCollection] = useState(false)
 
   // Filters — draft state (what's in the inputs)
   const [filterQ, setFilterQ] = useState('')

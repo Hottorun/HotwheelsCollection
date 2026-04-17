@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import { X, Camera, Save, Loader2, Flame, ImageIcon, Search, Plus, Check, Edit, Minus, Trash2 } from 'lucide-react'
 import {
   updateCar, getAllSeries, uploadCarImage,
-  updateCollectionEntry, createSeries, deleteCar,
+  updateCollectionEntry, createSeries, removeFromCollection,
 } from '../lib/api'
 import { InfoTooltip } from './InfoTooltip'
 import { SeriesEditModal } from './SeriesEditModal'
@@ -344,16 +344,16 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
   }
 
   const handleDelete = async () => {
-    if (!car) return
+    if (!car || !collectionEntry) return
     if (!confirmDelete) { setConfirmDelete(true); return }
     setDeleting(true)
     try {
-      await deleteCar(car.id)
-      toast.success(`"${car.name}" deleted`)
+      await removeFromCollection(collectionEntry.id)
+      toast.success(`"${car.name}" removed from collection`)
       onDelete?.(car.id)
       onClose()
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete')
+      toast.error(err instanceof Error ? err.message : 'Failed to remove')
     } finally {
       setDeleting(false)
       setConfirmDelete(false)
@@ -830,20 +830,22 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
 
             {/* ── Sticky save bar ── */}
             <div className="flex-shrink-0 border-t border-hw-border px-4 md:px-5 py-3 bg-hw-surface flex gap-2">
-              <button
-                type="button"
-                onClick={handleDelete}
-                disabled={deleting}
-                title="Delete car"
-                className={`flex-shrink-0 px-3 py-2 rounded-lg border text-sm font-medium flex items-center gap-1.5 transition-all ${
-                  confirmDelete
-                    ? 'border-red-500/60 bg-red-900/30 text-red-300 hover:bg-red-900/50'
-                    : 'border-hw-border text-hw-muted hover:border-red-500/40 hover:text-red-400'
-                }`}
-              >
-                {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                {confirmDelete ? 'Confirm?' : ''}
-              </button>
+              {collectionEntry && (
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  title="Remove from collection"
+                  className={`flex-shrink-0 px-3 py-2 rounded-lg border text-sm font-medium flex items-center gap-1.5 transition-all ${
+                    confirmDelete
+                      ? 'border-red-500/60 bg-red-900/30 text-red-300 hover:bg-red-900/50'
+                      : 'border-hw-border text-hw-muted hover:border-red-500/40 hover:text-red-400'
+                  }`}
+                >
+                  {deleting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  {confirmDelete ? 'Confirm?' : ''}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={onClose}

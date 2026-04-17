@@ -272,6 +272,7 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
     })
     setImageUrl(car.image_url)
     setImgError(false)
+    setConfirmDelete(false)
     getAllSeries().then(setAllSeries).catch(() => {})
   }, [isOpen, car, collectionEntry])
 

@@ -2,10 +2,10 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   ChevronLeft, ChevronRight, Loader2, ImageIcon, RefreshCw,
   CheckCircle2, Check, X, ExternalLink, Layers, BookmarkPlus,
-  BookmarkCheck, ChevronsRight, Search, ChevronDown,
+  BookmarkCheck, ChevronsRight, Search, ChevronDown, EyeOff,
 } from 'lucide-react'
 import {
-  getFeed, scrapeCar, createCar,
+  getFeed, scrapeCar, createCar, getCars,
   addToCollection as apiAddToCollection,
   getAllSeries, createSeries,
   type ScrapedCar, type ScrapedVersion, type FeedFilters,
@@ -397,6 +397,29 @@ export function DiscoverPage() {
   // Series cache
   const [allSeries, setAllSeries] = useState<Series[]>([])
 
+  // Permanently hidden castings (persisted in localStorage)
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('hw_hidden_castings')
+      return raw ? new Set(JSON.parse(raw)) : new Set()
+    } catch { return new Set() }
+  })
+
+  const hideForever = (id: string) => {
+    setHiddenIds(prev => {
+      const next = new Set(prev)
+      next.add(id)
+      try { localStorage.setItem('hw_hidden_castings', JSON.stringify([...next])) } catch {}
+      return next
+    })
+    setCards(prev => {
+      const filtered = prev.filter(c => c.collecthw_id !== id)
+      // Keep currentIdx in bounds
+      setCurrentIdx(i => Math.min(i, Math.max(0, filtered.length - 1)))
+      return filtered
+    })
+  }
+
   // Per-item approve state
   const [itemStates, setItemStates] = useState<Record<string, ItemState>>({})
   const [versionEdits, setVersionEdits] = useState<Record<string, VersionEdit>>({})
@@ -431,11 +454,12 @@ export function DiscoverPage() {
       setCards(prev => {
         const base = replace ? [] : prev
         const existingIds = new Set(base.map(c => c.collecthw_id).filter(Boolean))
+        const hidden = hiddenIds
         return [
           ...base,
           ...batch.filter(c =>
             !existingIds.has(c.collecthw_id) &&
-            !c.in_db &&
+            !hidden.has(c.collecthw_id ?? '') &&
             !PACK_RE.test(c.name ?? '')
           ),
         ]
@@ -512,22 +536,31 @@ export function DiscoverPage() {
     if (!current) return
 
     // CHW filtered result: no wiki URL, but card already carries year/color/type.
-    // Pre-populate the single-entry edit so data shows up immediately.
     if (!current.url) {
       const preEdit: VersionEdit = {}
       if (current.year) preEdit.year = String(current.year)
       if (current.primary_color) preEdit.color = current.primary_color
       if (current.car_type) preEdit.car_type = current.car_type
       setVersionEdits({ [`${currentIdx}:casting`]: preEdit })
-      // Provide a minimal castingDetail so the approve row renders
       setCastingDetail({ ...current, versions: [] })
       return
     }
 
-    // Wiki result: scrape for all versions
+    // Wiki result: scrape for all versions and fetch DB cars with same name in parallel
     setDetailLoading(true)
-    scrapeCar(current.url)
-      .then(d => {
+    const snapIdx = currentIdx
+    Promise.all([
+      scrapeCar(current.url),
+      getCars({ search: current.name, page_size: 200 }).catch(() => ({ items: [], total: 0, page: 1, page_size: 200, pages: 0 })),
+    ])
+      .then(([d, dbPage]) => {
+        // Build set of toy numbers already in DB for this casting
+        const dbToys = new Set<string>(
+          (dbPage.items ?? [])
+            .filter(c => c.toy_number)
+            .map(c => c.toy_number!.toUpperCase())
+        )
+
         // If a year filter is active, pin year-matching versions to the top
         const yr = activeFiltersRef.current.year
         if (yr && d.versions?.length) {
@@ -539,12 +572,35 @@ export function DiscoverPage() {
             ],
           }
         }
-        setCastingDetail(d)
+
+        // Filter out versions already in DB by toy number
+        const newVersions = dbToys.size > 0 && d.versions?.length
+          ? d.versions.filter(v => !v.toy_number || !dbToys.has(v.toy_number.toUpperCase()))
+          : d.versions
+
+        const detail = { ...d, versions: newVersions ?? [] }
+        setCastingDetail(detail)
+
         // Use the year-matching version's photo when available, otherwise the casting image
-        const yearMatchPhoto = yr ? d.versions?.find(v => v.year === yr)?.photo_url : null
+        const yearMatchPhoto = yr ? detail.versions?.find(v => v.year === yr)?.photo_url : null
         const imageToCache = yearMatchPhoto || d.image_url
         if (imageToCache) {
-          setCards(prev => prev.map((c, i) => i === currentIdx ? { ...c, image_url: imageToCache } : c))
+          setCards(prev => prev.map((c, i) => i === snapIdx ? { ...c, image_url: imageToCache } : c))
+        }
+
+        // All versions already in DB → hide casting forever and advance
+        if (dbToys.size > 0 && d.versions?.length && newVersions?.length === 0) {
+          const id = current.collecthw_id
+          if (id) {
+            setHiddenIds(prev => {
+              const next = new Set(prev)
+              next.add(id)
+              try { localStorage.setItem('hw_hidden_castings', JSON.stringify([...next])) } catch {}
+              return next
+            })
+          }
+          setCards(prev => prev.filter((_, i) => i !== snapIdx))
+          setCurrentIdx(i => Math.min(i, Math.max(0, cards.length - 2)))
         }
       })
       .catch(() => {})
@@ -886,7 +942,14 @@ export function DiscoverPage() {
               {/* Bottom info */}
               <div className="absolute bottom-0 left-0 right-0 p-4 flex items-end justify-between">
                 <div className="min-w-0">
-                  <h2 className="text-lg font-bold text-white leading-tight">{current.name}</h2>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h2 className="text-lg font-bold text-white leading-tight">{current.name}</h2>
+                    {current.in_db && (
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 border border-emerald-700/40 leading-none flex-shrink-0">
+                        IN DB
+                      </span>
+                    )}
+                  </div>
                   {(current.year || current.primary_color) && (
                     <p className="text-xs text-white/60 mt-0.5">
                       {[current.year, current.primary_color].filter(Boolean).join(' · ')}
@@ -1012,14 +1075,26 @@ export function DiscoverPage() {
             {allResolved && (
               <span className="text-xs text-emerald-400 font-medium">All done!</span>
             )}
-            <button
-              onClick={goNext}
-              disabled={currentIdx === cards.length - 1 && !loadingFeed}
-              className="ml-auto text-sm text-hw-muted hover:text-hw-text transition-colors flex items-center gap-1 disabled:opacity-30"
-            >
-              {allResolved ? 'Next casting' : 'Skip casting'}
-              <ChevronRight className="w-4 h-4" />
-            </button>
+            <div className="ml-auto flex items-center gap-3">
+              {current.collecthw_id && (
+                <button
+                  onClick={() => hideForever(current.collecthw_id!)}
+                  className="text-sm text-hw-muted/50 hover:text-red-400 transition-colors flex items-center gap-1"
+                  title="Never show this casting again"
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                  Never show
+                </button>
+              )}
+              <button
+                onClick={goNext}
+                disabled={currentIdx === cards.length - 1 && !loadingFeed}
+                className="text-sm text-hw-muted hover:text-hw-text transition-colors flex items-center gap-1 disabled:opacity-30"
+              >
+                {allResolved ? 'Next casting' : 'Skip casting'}
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <p className="text-center text-[11px] text-hw-muted/40 mt-4">← → keys · swipe on mobile</p>

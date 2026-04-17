@@ -413,7 +413,7 @@ export function BulkAddPage() {
       setColumnMappings({ 0: 'name' })
       return
     }
-    const lines = text.trim().split('\n')
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split('\n')
     const dataLines = (hasHeader ? lines.slice(1) : lines).filter(l => l.trim())
     const colCount = lines[0]?.split(delimiter).length ?? 1
 
@@ -447,7 +447,7 @@ export function BulkAddPage() {
 
   // Build initial ImportRows from raw text
   const buildInitialRows = (): ImportRow[] => {
-    const lines = text.trim().split('\n')
+    const lines = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split('\n')
     const dataLines = hasHeader ? lines.slice(1) : lines
 
     const result: ImportRow[] = []
@@ -508,10 +508,24 @@ export function BulkAddPage() {
     return result
   }
 
-  // Preview rows (up to 6 lines)
+  // Normalised line count (actual total, not preview)
+  const totalDataRows = (() => {
+    if (!text.trim()) return 0
+    const lines = text.trim().split('\n').filter(l => l.trim())
+    const dataLines = hasHeader ? lines.slice(1) : lines
+    if (delimiter === '\n') return dataLines.length
+    return dataLines.filter(l => {
+      const cells = l.split(delimiter)
+      const entry = Object.entries(columnMappings).find(([, f]) => f === 'name')
+      if (!entry) return cells[0]?.trim()
+      return cells[Number(entry[0])]?.trim()
+    }).length
+  })()
+
+  // Preview rows (first 6 data rows only — for the column-mapper table)
   const allPreviewRows = (() => {
     if (!text.trim()) return []
-    const lines = text.trim().split('\n').slice(0, 7)
+    const lines = text.trim().split('\n').slice(0, 8)
     if (delimiter === '\n') return lines.map(l => [l.trim()])
     return lines.map(l => l.split(delimiter).map(c => c.trim().replace(/^"|"$/g, '')))
   })()
@@ -664,13 +678,13 @@ export function BulkAddPage() {
             <div
               className="w-full h-20 border-2 border-dashed border-hw-border rounded-xl flex flex-col items-center justify-center gap-1.5 cursor-pointer hover:border-hw-accent hover:bg-hw-accent/5 transition-colors mb-3"
               onClick={() => fileRef.current?.click()}
-              onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) { const r = new FileReader(); r.onload = ev => setText(ev.target?.result as string); r.readAsText(f) } }}
+              onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) { const r = new FileReader(); r.onload = ev => setText((ev.target?.result as string ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')); r.readAsText(f) } }}
               onDragOver={e => e.preventDefault()}
             >
               <Upload className="w-4 h-4 text-hw-muted" />
               <p className="text-sm text-hw-text-secondary">Drop CSV / TXT or <span className="text-hw-accent">browse</span></p>
             </div>
-            <input ref={fileRef} type="file" accept=".csv,.txt" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = ev => setText(ev.target?.result as string); r.readAsText(f) } }} />
+            <input ref={fileRef} type="file" accept=".csv,.txt" className="hidden" onChange={e => { const f = e.target.files?.[0]; if (f) { const r = new FileReader(); r.onload = ev => setText((ev.target?.result as string ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n')); r.readAsText(f) } }} />
             <textarea
               value={text}
               onChange={e => setText(e.target.value)}
@@ -704,7 +718,7 @@ export function BulkAddPage() {
           {delimiter !== '\n' && allPreviewRows.length > 0 && (
             <div>
               <p className="text-xs text-hw-muted mb-2">
-                {dataPreview.length} {dataPreview.length === 1 ? 'row' : 'rows'} detected — assign columns:
+                {totalDataRows.toLocaleString()} {totalDataRows === 1 ? 'row' : 'rows'} detected — assign columns (showing first {dataPreview.length}):
               </p>
               <div className="bg-hw-bg rounded-xl border border-hw-border overflow-x-auto">
                 <table className="text-xs w-full">

@@ -705,13 +705,15 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
       primary_color: v.color || prev.primary_color,
       set_number: v.set_number ? String(v.set_number) : prev.set_number,
       series_number: v.series_number ? String(v.series_number) : prev.series_number,
+      toy_number: v.toy_number || prev.toy_number,
       series_id: seriesMatch ? seriesMatch.id : prev.series_id,
-      new_series_name: isNewSeries ? v.series_name! : prev.new_series_name,
+      new_series_name: isNewSeries ? v.series_name! : '',
       new_series_type: isNewSeries ? (isCollectorSeries ? 'collector' : isPremiumSeries ? 'premium' : prev.new_series_type) : prev.new_series_type,
       // For TH toggle: premium series can't be TH
       th_type: seriesMatch?.type === 'premium' || (isNewSeries && isPremiumSeries) ? 'none' : prev.th_type,
     }))
     if (isNewSeries) setShowNewSeries(true)
+    else setShowNewSeries(false)
 
     // Use version photo if available, otherwise keep casting image
     if (v.photo_url) {
@@ -1227,9 +1229,11 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
           series={series}
           selectedId={form.series_id}
           onSelect={(s) => {
+            setShowNewSeries(false)
             setForm(prev => ({
               ...prev,
               series_id: s.id,
+              new_series_name: '',
               new_series_type: s.type,
               th_type: s.type === 'premium' ? 'none' : prev.th_type,
             }))

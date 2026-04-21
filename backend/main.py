@@ -786,6 +786,38 @@ async def _wiki_search(client: httpx.AsyncClient, q: str, limit: int = 10) -> li
         item for item in data.get("query", {}).get("search", [])
         if _is_casting_title(item.get("title", ""))
     ]
+
+    # MediaWiki treats "-" as NOT operator, so "what-4-2" searches as "what NOT 4 NOT 2".
+    # If that yields nothing, fall back to a direct title lookup.
+    if not search_items and re.search(r"[-]", q):
+        try:
+            direct_title = q.strip().replace(" ", "_")
+            tr = await client.get(
+                f"{WIKI_BASE}/api.php",
+                params={"action": "query", "titles": direct_title,
+                        "prop": "pageimages", "pithumbsize": "300", "format": "json"},
+                headers=HEADERS,
+                timeout=10,
+            )
+            pages = tr.json().get("query", {}).get("pages", {})
+            for pid, pd in pages.items():
+                if int(pid) > 0 and _is_casting_title(pd.get("title", "")):
+                    title = pd["title"]
+                    thumb = pd.get("thumbnail", {})
+                    return [{
+                        "collecthw_id": pid,
+                        "name": title,
+                        "year": None, "series_name": None, "primary_color": None,
+                        "image_url": thumb.get("source") if thumb else None,
+                        "treasure_hunt": False, "car_type": "mainline",
+                        "series_number": None, "set_number": None, "barcode": None,
+                        "versions": [],
+                        "url": f"{WIKI_BASE}/wiki/{title.replace(' ', '_')}",
+                    }]
+        except Exception:
+            pass
+        return []
+
     if not search_items:
         return []
 

@@ -1,8 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   Plus,
-  ChevronLeft,
-  ChevronRight,
   Library,
   SlidersHorizontal,
   X,
@@ -29,7 +27,6 @@ import {
 import { useDebounce } from '../hooks/useDebounce'
 import type { Car, CollectionEntry, WishlistEntry, Series } from '../types'
 
-const PAGE_SIZE = 20
 const CAR_TYPES = ['', 'mainline', 'premium', 'special mainline', 'collector']
 
 export function AllCarsPage() {
@@ -44,9 +41,6 @@ export function AllCarsPage() {
   const [series, setSeries] = useState<Series[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-
-  const [page, setPage] = useState(1)
-  const [totalPages, setTotalPages] = useState(1)
   const [totalItems, setTotalItems] = useState(0)
 
   const [showFilters, setShowFilters] = useState(false)
@@ -101,8 +95,8 @@ export function AllCarsPage() {
     setError(null)
     try {
       const params = {
-        page,
-        page_size: PAGE_SIZE,
+        page: 1,
+        page_size: 9999,
         ...(debouncedSearch && { search: debouncedSearch }),
         ...(filters.series_id && { series_id: filters.series_id }),
         ...(filters.year && { year: filters.year }),
@@ -110,19 +104,16 @@ export function AllCarsPage() {
         ...(filters.treasure_hunt && { treasure_hunt: filters.treasure_hunt }),
       }
       const data = await getCars(params)
-      // Handle both paginated { items, total, total_pages } and raw array (fallback)
       const items = Array.isArray(data) ? data : (data.items ?? [])
       const total = Array.isArray(data) ? items.length : (data.total ?? 0)
-      const totalPgs = Array.isArray(data) ? 1 : (data.total_pages ?? 1)
       setCars(items)
-      setTotalPages(totalPgs)
       setTotalItems(total)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load cars')
     } finally {
       setLoading(false)
     }
-  }, [page, debouncedSearch, filters])
+  }, [debouncedSearch, filters])
 
   const fetchSideData = useCallback(async () => {
     try {
@@ -142,10 +133,6 @@ export function AllCarsPage() {
   useEffect(() => {
     fetchSideData()
   }, [fetchSideData])
-
-  useEffect(() => {
-    setPage(1)
-  }, [debouncedSearch, filters])
 
   useEffect(() => {
     fetchCars()
@@ -250,10 +237,6 @@ export function AllCarsPage() {
             <Layers className="w-3.5 h-3.5" />
           </button>
         </div>
-
-        <span className="text-xs text-hw-muted ml-auto">
-          Page {page} of {totalPages}
-        </span>
       </div>
 
       {/* Expanded filters */}
@@ -358,35 +341,34 @@ export function AllCarsPage() {
 
       {/* Cars (grid or by-series) */}
       {!loading && !error && cars.length > 0 && (
-        <>
-          {viewMode === 'series' ? (
-            <div className="space-y-8">
-              {groupedBySeries.map(({ key, name, cars: groupCars }) => (
-                <div key={key}>
-                  <div className="flex items-center gap-3 mb-3">
-                    <h3 className="text-sm font-semibold text-hw-text-secondary uppercase tracking-wider">{name}</h3>
-                    <span className="text-xs text-hw-muted">{groupCars.length}</span>
-                    <div className="flex-1 h-px bg-hw-border" />
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-                    {groupCars.map(car => (
-                      <CarCard
-                        key={car.id}
-                        car={car}
-                        collectionEntry={collectionMap.get(car.id)}
-                        wishlistEntry={wishlistMap.get(car.id)}
-                        wishlistPending={wishlistPending.has(car.id)}
-                        onAddToCollection={(c) => setCollectionModal({ open: true, car: c, entry: collectionMap.get(c.id) })}
-                        onAddToWishlist={handleAddToWishlist}
-                        onRemoveFromWishlist={handleRemoveFromWishlist}
-                        onEditCarDetails={(c) => setCarDetailModal({ open: true, car: c, collectionEntry: collectionMap.get(c.id) })}
-                      />
-                    ))}
-                  </div>
+        viewMode === 'series' ? (
+          <div className="space-y-8">
+            {groupedBySeries.map(({ key, name, cars: groupCars }) => (
+              <div key={key}>
+                <div className="flex items-center gap-3 mb-3">
+                  <h3 className="text-sm font-semibold text-hw-text-secondary uppercase tracking-wider">{name}</h3>
+                  <span className="text-xs text-hw-muted">{groupCars.length}</span>
+                  <div className="flex-1 h-px bg-hw-border" />
                 </div>
-              ))}
-            </div>
-          ) : (
+                <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+                  {groupCars.map(car => (
+                    <CarCard
+                      key={car.id}
+                      car={car}
+                      collectionEntry={collectionMap.get(car.id)}
+                      wishlistEntry={wishlistMap.get(car.id)}
+                      wishlistPending={wishlistPending.has(car.id)}
+                      onAddToCollection={(c) => setCollectionModal({ open: true, car: c, entry: collectionMap.get(c.id) })}
+                      onAddToWishlist={handleAddToWishlist}
+                      onRemoveFromWishlist={handleRemoveFromWishlist}
+                      onEditCarDetails={(c) => setCarDetailModal({ open: true, car: c, collectionEntry: collectionMap.get(c.id) })}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
             {cars.map((car) => (
               <CarCard
@@ -408,63 +390,7 @@ export function AllCarsPage() {
               />
             ))}
           </div>
-          )}
-
-          {/* Pagination */}
-          <div className="flex items-center justify-center gap-3 mt-8">
-            <button
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={page === 1}
-              className="btn-secondary py-2 px-3 disabled:opacity-40"
-            >
-              <ChevronLeft className="w-4 h-4" />
-              Prev
-            </button>
-
-            <div className="flex items-center gap-1">
-              {Array.from({ length: Math.min(5, totalPages) }).map((_, i) => {
-                let pageNum: number
-                if (totalPages <= 5) {
-                  pageNum = i + 1
-                } else if (page <= 3) {
-                  pageNum = i + 1
-                } else if (page >= totalPages - 2) {
-                  pageNum = totalPages - 4 + i
-                } else {
-                  pageNum = page - 2 + i
-                }
-                return (
-                  <button
-                    key={pageNum}
-                    onClick={() => setPage(pageNum)}
-                    className={`
-                      w-8 h-8 rounded-lg text-sm font-medium transition-colors
-                      ${pageNum === page
-                        ? 'bg-hw-accent text-white'
-                        : 'text-hw-muted hover:text-hw-text hover:bg-hw-surface-hover'
-                      }
-                    `}
-                  >
-                    {pageNum}
-                  </button>
-                )
-              })}
-            </div>
-
-            <button
-              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-              disabled={page === totalPages}
-              className="btn-secondary py-2 px-3 disabled:opacity-40"
-            >
-              Next
-              <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-
-          <p className="text-center text-xs text-hw-muted mt-2">
-            Showing {(page - 1) * PAGE_SIZE + 1}–{Math.min(page * PAGE_SIZE, totalItems)} of {totalItems.toLocaleString()} cars
-          </p>
-        </>
+        )
       )}
 
       {/* FAB */}

@@ -282,3 +282,7 @@ export async function scrapeSearch(q: string, prefer: 'chw' | 'wiki' = 'chw'): P
 export async function scrapeCar(url: string): Promise<ScrapedCar> {
   return request<ScrapedCar>(`/api/scrape/car?url=${encodeURIComponent(url)}`)
 }
+
+export async function toyNumberLookup(code: string): Promise<ScrapedCar[]> {
+  return request<ScrapedCar[]>(`/api/toy-number/lookup?code=${encodeURIComponent(code)}`)
+}

@@ -10,6 +10,7 @@ import {
   uploadCarImage,
   scrapeSearch,
   scrapeCar,
+  toyNumberLookup,
   type ScrapedCar,
   type ScrapedVersion,
 } from '../lib/api'
@@ -472,6 +473,10 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
   const [showWikiResults, setShowWikiResults] = useState(false)
   const wikiDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Car code lookup state
+  const [carCode, setCarCode] = useState('')
+  const [carCodeSearching, setCarCodeSearching] = useState(false)
+
   // Version picker state
   const [versions, setVersions] = useState<ScrapedVersion[]>([])
   const [castingName, setCastingName] = useState('')
@@ -518,6 +523,7 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
     setCastingName('')
     setShowVersionPicker(false)
     setShowSeriesPicker(false)
+    setCarCode('')
   }, [])
 
   const handleClose = () => {
@@ -592,6 +598,40 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
         setWikiSearching(false)
       }
     }, 400)
+  }
+
+  const handleCarCodeLookup = async () => {
+    const code = carCode.trim().toUpperCase()
+    if (!code) return
+    setCarCodeSearching(true)
+    try {
+      const results = await toyNumberLookup(code)
+      if (!results || results.length === 0) {
+        toast.error(`No car found for code "${code}"`)
+        return
+      }
+      const car = results[0]
+      setShowWikiResults(false)
+      setSelectedCarUrl(car.url || null)
+      applyScrapedData(car, false)
+      if (car.url) {
+        setCarCodeSearching(true)
+        try {
+          const detail = await scrapeCar(car.url)
+          if (detail) applyScrapedData(detail, true)
+        } catch {
+          toast.success('Auto-filled!')
+        } finally {
+          setCarCodeSearching(false)
+        }
+      } else {
+        toast.success('Auto-filled!')
+      }
+    } catch {
+      toast.error(`No car found for code "${code}"`)
+    } finally {
+      setCarCodeSearching(false)
+    }
   }
 
   // Apply scraped data to the form (used by both search select and preloaded scrape)
@@ -814,19 +854,24 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
       <Modal isOpen={isOpen} onClose={handleClose} title="Add Car to Catalog" size="lg">
         <form onSubmit={handleSubmit} className="space-y-4">
 
-          {/* ── Name ── */}
+          {/* ── Name + Car Code ── */}
           <div>
-            <label className="label">Car Name <span className="text-hw-accent">*</span></label>
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-hw-muted pointer-events-none z-10" />
-              <input
-                name="name"
-                value={form.name}
-                onChange={handleNameChange}
-                className="input-field pl-8 pr-8"
-                placeholder="Search or type car name (e.g. Bone Shaker, '69 Camaro…)"
-                required
-              />
+            <div className="flex items-center justify-between mb-1">
+              <label className="label mb-0">Car Name <span className="text-hw-accent">*</span></label>
+              <span className="text-xs text-hw-muted">or search by code</span>
+            </div>
+            <div className="flex gap-2">
+              {/* Name search */}
+              <div className="relative flex-1 min-w-0">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-hw-muted pointer-events-none z-10" />
+                <input
+                  name="name"
+                  value={form.name}
+                  onChange={handleNameChange}
+                  className="input-field pl-8 pr-8 w-full"
+                  placeholder="Name or search (e.g. Bone Shaker…)"
+                  required
+                />
               {wikiSearching ? (
                 <Loader2 className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-hw-muted animate-spin z-10" />
               ) : wikiQuery ? (
@@ -861,7 +906,33 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
                   ))}
                 </div>
               )}
+              </div>
+
+              {/* Car code input — inline to the right */}
+              <div className="flex gap-1.5 flex-shrink-0">
+                <input
+                  value={carCode}
+                  onChange={e => setCarCode(e.target.value.toUpperCase())}
+                  onKeyDown={e => e.key === 'Enter' && (e.preventDefault(), handleCarCodeLookup())}
+                  className="input-field uppercase font-mono tracking-widest w-24 text-sm"
+                  placeholder="CFH13"
+                  maxLength={8}
+                  title="Car code from packaging"
+                />
+                <button
+                  type="button"
+                  onClick={handleCarCodeLookup}
+                  disabled={!carCode.trim() || carCodeSearching}
+                  className="btn-primary px-3 flex-shrink-0 disabled:opacity-50"
+                  title="Look up by car code"
+                >
+                  {carCodeSearching
+                    ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    : <Search className="w-3.5 h-3.5" />}
+                </button>
+              </div>
             </div>
+
             <div className="flex items-center justify-between mt-1.5">
               <p className="text-xs text-hw-muted">Search Hot Wheels wiki to auto-fill details</p>
               {versions.length > 0 && (

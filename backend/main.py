@@ -771,27 +771,24 @@ async def _chw_search(client: httpx.AsyncClient, q: str) -> list[dict]:
 
 async def _wiki_search(client: httpx.AsyncClient, q: str, limit: int = 10) -> list[dict]:
     """Search the Hot Wheels wiki and return ScrapedCar dicts (images from pageimages API)."""
+
+    # Always try a direct page-title lookup first — it's exact and instant.
+    # Covers hyphens (MediaWiki treats "-" as NOT in text search), year abbreviations
+    # like '96/'69 (wiki uses curly U+2018 quote), and multi-word names like
+    # "Lamborghini Veneno" that text search ranks behind broader results.
+    # MediaWiki only auto-capitalises the FIRST letter of a title, so we must also
+    # try a title-cased variant (each word's first letter uppercased) to handle
+    # queries typed in lowercase.
+    def _title_variants(s: str) -> list[str]:
+        base = s.replace(" ", "_")
+        titled = "_".join(w[:1].upper() + w[1:] for w in s.split()).replace(" ", "_")
+        variants: list[str] = list(dict.fromkeys([base, titled]))  # preserve order, dedupe
+        if "'" in base:  # also try curly left quote used by wiki for '69, '96, etc.
+            variants += [v.replace("'", "\u2018") for v in variants]
+        return list(dict.fromkeys(variants))
+
     try:
-        search_url = (
-            f"{WIKI_BASE}/api.php"
-            f"?action=query&list=search&srsearch={quote(q.strip())}&srlimit={limit}&format=json"
-        )
-        resp = await client.get(search_url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return []
-
-    search_items = [
-        item for item in data.get("query", {}).get("search", [])
-        if _is_casting_title(item.get("title", ""))
-    ]
-
-    # MediaWiki treats "-" as NOT operator, so "what-4-2" searches as "what NOT 4 NOT 2".
-    # If that yields nothing, fall back to a direct title lookup.
-    if not search_items and re.search(r"[-]", q):
-        try:
-            direct_title = q.strip().replace(" ", "_")
+        for direct_title in _title_variants(q.strip()):
             tr = await client.get(
                 f"{WIKI_BASE}/api.php",
                 params={"action": "query", "titles": direct_title,
@@ -814,9 +811,25 @@ async def _wiki_search(client: httpx.AsyncClient, q: str, limit: int = 10) -> li
                         "versions": [],
                         "url": f"{WIKI_BASE}/wiki/{title.replace(' ', '_')}",
                     }]
-        except Exception:
-            pass
+    except Exception:
+        pass
+    # Direct lookup found nothing — fall through to full-text search
+
+    try:
+        search_url = (
+            f"{WIKI_BASE}/api.php"
+            f"?action=query&list=search&srsearch={quote(q.strip())}&srlimit={limit}&format=json"
+        )
+        resp = await client.get(search_url, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
         return []
+
+    search_items = [
+        item for item in data.get("query", {}).get("search", [])
+        if _is_casting_title(item.get("title", ""))
+    ]
 
     if not search_items:
         return []
@@ -1087,21 +1100,85 @@ async def scrape_feed(
     return pool[:n]
 
 
+async def _toy_num_car_name(client: httpx.AsyncClient, page_title: str, code: str) -> Optional[str]:
+    """Fetch a Hot Wheels list page and return the car name for the given toy number."""
+    try:
+        resp = await client.get(
+            f"{WIKI_BASE}/api.php",
+            params={"action": "parse", "page": page_title, "prop": "text", "format": "json"},
+            headers=HEADERS,
+            timeout=15,
+        )
+        html = resp.json()["parse"]["text"]["*"]
+        soup = BeautifulSoup(html, "html.parser")
+        for cell in soup.find_all(["td", "th"]):
+            if _clean(cell.get_text()).upper() == code:
+                row = cell.find_parent("tr")
+                if not row:
+                    continue
+                for c in row.find_all(["td", "th"]):
+                    link = c.find("a")
+                    if link and _clean(c.get_text()) != code:
+                        name = _clean(link.get_text())
+                        if name and not name.startswith("List"):
+                            return name
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/api/toy-number/lookup")
+async def toy_number_lookup(code: str, user=Depends(get_current_user)):
+    """Look up a Hot Wheels car by its toy number / car code (e.g. CFH13).
+
+    The 'List of YYYY Hot Wheels' pages are the canonical source for toy numbers.
+    Full-text search finds the right list page; we parse its table to extract the
+    car name, then do a direct wiki lookup for that casting.
+    """
+    code = code.strip().upper()
+    if len(code) < 3:
+        raise HTTPException(status_code=400, detail="Code too short")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Full-text wiki search — finds the "List of YYYY Hot Wheels" page that
+        # contains this toy number in its table.
+        try:
+            resp = await client.get(
+                f"{WIKI_BASE}/api.php",
+                params={"action": "query", "list": "search", "srsearch": code,
+                        "srwhat": "text", "srlimit": "10", "format": "json"},
+                headers=HEADERS,
+                timeout=10,
+            )
+            search_items = resp.json().get("query", {}).get("search", [])
+        except Exception:
+            raise HTTPException(status_code=404, detail="Lookup failed")
+
+        # Find the "List of YYYY Hot Wheels ..." page — ignore everything else.
+        list_hits = [r for r in search_items
+                     if re.search(r"^List of \d{4} Hot Wheels", r.get("title", ""))]
+        if not list_hits:
+            raise HTTPException(status_code=404, detail="No car found for that code")
+
+        list_title = list_hits[0]["title"].replace(" ", "_")
+        car_name = await _toy_num_car_name(client, list_title, code)
+        if not car_name:
+            raise HTTPException(status_code=404, detail="No car found for that code")
+
+        results = await _wiki_search(client, car_name, limit=3)
+        if not results:
+            raise HTTPException(status_code=404, detail="No car found for that code")
+        return results
+
+
 @app.get("/api/scrape/search")
-async def scrape_search(q: str, prefer: str = "chw", user=Depends(get_current_user)):
-    """Search for cars. prefer='wiki' returns wiki castings first; prefer='chw' (default) returns collecthw releases first."""
+async def scrape_search(q: str, user=Depends(get_current_user)):
+    """Search for Hot Wheels castings via the wiki."""
     if not q or len(q.strip()) < 2:
         return []
 
     async with httpx.AsyncClient() as client:
-        if prefer == "wiki":
-            results = await _wiki_search(client, q.strip(), limit=15)
-            if not results:
-                results = await _chw_search_cached(client, q.strip())
-        else:
-            results = await _chw_search_cached(client, q.strip())
-            if not results:
-                results = await _wiki_search(client, q.strip(), limit=10)
+        results = await _wiki_search(client, q.strip(), limit=15)
 
     return results
 

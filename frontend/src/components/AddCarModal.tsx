@@ -955,6 +955,18 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
                 </span>
                 <ChevronRight className="w-4 h-4 text-hw-muted" />
               </button>
+            ) : showNewSeries && form.new_series_name ? (
+              <button
+                type="button"
+                onClick={() => setShowSeriesPicker(true)}
+                className="w-full flex items-center justify-between px-3 py-2.5 rounded-lg border border-dashed border-hw-border bg-hw-bg hover:bg-hw-surface-hover transition-colors text-left"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <Plus className="w-3.5 h-3.5 text-hw-muted flex-shrink-0" />
+                  <span className="text-sm text-hw-text truncate">{form.new_series_name}</span>
+                </div>
+                <ChevronRight className="w-4 h-4 text-hw-muted" />
+              </button>
             ) : (
               <button
                 type="button"
@@ -964,6 +976,34 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
                 <Search className="w-4 h-4" />
                 <span className="text-sm">Select a series</span>
               </button>
+            )}
+
+            {/* New series creation preview */}
+            {!form.series_id && showNewSeries && form.new_series_name && (
+              <div className="mt-2 flex items-center gap-2 px-3 py-2 rounded-lg bg-hw-surface border border-hw-border/60">
+                <Plus className="w-3.5 h-3.5 text-hw-muted flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-hw-muted leading-tight">
+                    Will create new{' '}
+                    <span className={
+                      form.new_series_type === 'premium' ? 'text-amber-400 font-medium' :
+                      form.new_series_type === 'collector' ? 'text-purple-400 font-medium' :
+                      'text-hw-text font-medium'
+                    }>
+                      {form.new_series_type}
+                    </span>{' '}series:
+                  </p>
+                  <p className="text-xs font-medium text-hw-text truncate">{form.new_series_name}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => { setShowNewSeries(false); setForm(p => ({ ...p, new_series_name: '' })) }}
+                  className="text-hw-muted hover:text-hw-text flex-shrink-0 transition-colors"
+                  title="Dismiss — select an existing series instead"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
             )}
           </div>
 

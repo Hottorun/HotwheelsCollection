@@ -9,6 +9,7 @@ import { useSearch } from '../contexts/SearchContext'
 import { useToastContext } from '../contexts/ToastContext'
 import { getCollection, getAllSeries, addToWishlist } from '../lib/api'
 import { useDebounce } from '../hooks/useDebounce'
+import { isMarkedForReview } from '../lib/review'
 import type { CollectionEntry, Car, Series } from '../types'
 
 const CONDITIONS = ['', 'mint', 'good', 'fair', 'poor']
@@ -37,6 +38,7 @@ export function CollectionPage() {
     series_id: '',
     year: '',
     condition: '',
+    review: '',
     sort: 'date_desc',
   })
 
@@ -106,6 +108,12 @@ export function CollectionPage() {
       items = items.filter((e) => e.condition === filters.condition)
     }
 
+    if (filters.review === 'true') {
+      items = items.filter((e) => isMarkedForReview(e.notes))
+    } else if (filters.review === 'false') {
+      items = items.filter((e) => !isMarkedForReview(e.notes))
+    }
+
     items.sort((a, b) => {
       switch (filters.sort) {
         case 'date_asc':
@@ -132,6 +140,7 @@ export function CollectionPage() {
     filters.series_id,
     filters.year,
     filters.condition,
+    filters.review,
   ].filter(Boolean).length
 
   const groupedBySeries = useMemo(() => {
@@ -207,6 +216,13 @@ export function CollectionPage() {
           </select>
         )}
 
+        <button
+          onClick={() => setFilters((p) => ({ ...p, review: p.review === 'true' ? '' : 'true' }))}
+          className={`btn-secondary text-sm py-1.5 px-3 ${filters.review === 'true' ? 'border-amber-600 text-amber-400 bg-amber-950/20' : ''}`}
+        >
+          Review
+        </button>
+
         {/* View toggle */}
         <div className="flex items-center gap-1 ml-auto p-0.5 bg-hw-surface border border-hw-border rounded-lg">
           <button
@@ -234,7 +250,7 @@ export function CollectionPage() {
 
       {/* Expanded filters */}
       {showFilters && (
-        <div className="p-4 bg-hw-surface border border-hw-border rounded-xl mb-4 grid grid-cols-1 sm:grid-cols-3 gap-3 animate-fade-in">
+        <div className="p-4 bg-hw-surface border border-hw-border rounded-xl mb-4 grid grid-cols-1 sm:grid-cols-4 gap-3 animate-fade-in">
           <div>
             <label className="label">Series</label>
             <select
@@ -272,10 +288,22 @@ export function CollectionPage() {
               ))}
             </select>
           </div>
+          <div>
+            <label className="label">Review</label>
+            <select
+              value={filters.review}
+              onChange={(e) => setFilters((p) => ({ ...p, review: e.target.value }))}
+              className="input-field"
+            >
+              <option value="">All</option>
+              <option value="true">For Review</option>
+              <option value="false">Not For Review</option>
+            </select>
+          </div>
           {activeFilterCount > 0 && (
-            <div className="sm:col-span-3 flex justify-end">
+            <div className="sm:col-span-4 flex justify-end">
               <button
-                onClick={() => setFilters((p) => ({ ...p, series_id: '', year: '', condition: '' }))}
+                onClick={() => setFilters((p) => ({ ...p, series_id: '', year: '', condition: '', review: '' }))}
                 className="btn-ghost text-xs text-hw-accent hover:text-hw-orange"
               >
                 <X className="w-3.5 h-3.5" />

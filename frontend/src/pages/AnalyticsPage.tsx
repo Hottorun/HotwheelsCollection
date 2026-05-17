@@ -12,6 +12,7 @@ import {
 } from 'lucide-react'
 import { useToastContext } from '../contexts/ToastContext'
 import { getAnalytics } from '../lib/api'
+import { colorToCss } from '../lib/colors'
 import type { Analytics } from '../types'
 
 interface StatCardProps {
@@ -338,7 +339,7 @@ export function AnalyticsPage() {
                   <div className="flex items-center gap-2">
                     <span
                       className="w-3 h-3 rounded-full flex-shrink-0 border border-white/10"
-                      style={{ backgroundColor: color.toLowerCase() }}
+                      style={{ backgroundColor: colorToCss(color) }}
                     />
                     <span className="text-sm text-hw-text capitalize">{color}</span>
                   </div>
@@ -349,7 +350,7 @@ export function AnalyticsPage() {
                     className="h-full rounded-full transition-all duration-700"
                     style={{
                       width: `${(count / maxColorCount) * 100}%`,
-                      backgroundColor: color.toLowerCase(),
+                      backgroundColor: colorToCss(color),
                       opacity: 0.8,
                     }}
                   />

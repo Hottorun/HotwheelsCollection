@@ -48,6 +48,7 @@ function inferSeriesType(name: string): string | null {
 function VersionApproveRow({
   castingImageUrl,
   version,
+  inDb,
   state,
   addToCollection,
   onToggleCollection,
@@ -56,11 +57,13 @@ function VersionApproveRow({
   edit,
   onEditChange,
   onApprove,
+  onReview,
   onSkip,
   allSeries,
 }: {
   castingImageUrl?: string
   version: ScrapedVersion | null
+  inDb?: boolean
   state: ItemState
   addToCollection: boolean
   onToggleCollection: () => void
@@ -69,6 +72,7 @@ function VersionApproveRow({
   edit: VersionEdit
   onEditChange: (patch: Partial<VersionEdit>) => void
   onApprove: () => void
+  onReview: () => void
   onSkip: () => void
   allSeries: Series[]
 }) {
@@ -156,6 +160,12 @@ function VersionApproveRow({
                   : 'bg-zinc-800 text-zinc-400 border-zinc-600/30'
               }`}>{carType.toUpperCase()}</span>
             )}
+            {inDb && (
+              <span className="inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded border leading-none bg-emerald-900/40 text-emerald-300 border-emerald-700/40">
+                <CheckCircle2 className="w-2.5 h-2.5" />
+                IN DB
+              </span>
+            )}
           </div>
           {color && <p className="text-xs text-hw-text-secondary mt-0.5 truncate">{color}</p>}
           {series && <p className="text-[11px] text-hw-muted truncate mt-0.5">{series}</p>}
@@ -185,10 +195,21 @@ function VersionApproveRow({
 
             <button
               onClick={onApprove}
+              disabled={inDb}
               className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-hw-accent text-white text-xs font-semibold hover:bg-hw-accent-hover transition-colors"
+              title={inDb ? 'This version is already in All Cars' : 'Add'}
             >
               <Check className="w-3 h-3" />
               Add
+            </button>
+
+            <button
+              onClick={onReview}
+              disabled={inDb}
+              className="w-7 h-7 rounded-lg border border-hw-border text-hw-muted hover:border-amber-700/60 hover:text-amber-300 hover:bg-amber-900/20 transition-colors flex items-center justify-center"
+              title={inDb ? 'This version is already in All Cars' : 'Add and mark for review'}
+            >
+              <Search className="w-3.5 h-3.5" />
             </button>
 
             <button
@@ -573,12 +594,12 @@ export function DiscoverPage() {
           }
         }
 
-        // Filter out versions already in DB by toy number
-        const newVersions = dbToys.size > 0 && d.versions?.length
-          ? d.versions.filter(v => !v.toy_number || !dbToys.has(v.toy_number.toUpperCase()))
-          : d.versions
+        const markedVersions = d.versions?.map(v => ({
+          ...v,
+          in_db: !!v.toy_number && dbToys.has(v.toy_number.toUpperCase()),
+        }))
 
-        const detail = { ...d, versions: newVersions ?? [] }
+        const detail = { ...d, versions: markedVersions ?? [] }
         setCastingDetail(detail)
 
         // Use the year-matching version's photo when available, otherwise the casting image
@@ -588,20 +609,6 @@ export function DiscoverPage() {
           setCards(prev => prev.map((c, i) => i === snapIdx ? { ...c, image_url: imageToCache } : c))
         }
 
-        // All versions already in DB → hide casting forever and advance
-        if (dbToys.size > 0 && d.versions?.length && newVersions?.length === 0) {
-          const id = current.collecthw_id
-          if (id) {
-            setHiddenIds(prev => {
-              const next = new Set(prev)
-              next.add(id)
-              try { localStorage.setItem('hw_hidden_castings', JSON.stringify([...next])) } catch {}
-              return next
-            })
-          }
-          setCards(prev => prev.filter((_, i) => i !== snapIdx))
-          setCurrentIdx(i => Math.min(i, Math.max(0, cards.length - 2)))
-        }
       })
       .catch(() => {})
       .finally(() => setDetailLoading(false))
@@ -650,12 +657,13 @@ export function DiscoverPage() {
     }
   }
 
-  const handleApprove = async (key: string, version: ScrapedVersion | null) => {
+  const handleApprove = async (key: string, version: ScrapedVersion | null, review = false) => {
     if (!current) return
+    if ((version as ScrapedVersion & { in_db?: boolean } | null)?.in_db && !review) return
     const vd = getVersionData(key, version)
     const name = castingDetail?.name || current.name || ''
     const imageUrl = vd.photo_url ?? castingDetail?.image_url ?? current.image_url ?? undefined
-    const collect = versionCollect[key] ?? shouldAddToCollection
+    const collect = review ? true : (versionCollect[key] ?? shouldAddToCollection)
 
     setItemStates(prev => ({ ...prev, [key]: 'adding' }))
     try {
@@ -692,11 +700,16 @@ export function DiscoverPage() {
       })
 
       if (collect) {
-        await apiAddToCollection({ allcars_id: car.id, carded: true, condition: 'mint' })
+        await apiAddToCollection({
+          allcars_id: car.id,
+          carded: true,
+          condition: 'mint',
+          notes: review ? 'Review: verify this is the exact version owned.' : undefined,
+        })
       }
 
       setItemStates(prev => ({ ...prev, [key]: 'added' }))
-      toast.success(`${name}${vd.year ? ` · ${vd.year}` : ''} added!`)
+      toast.success(`${name}${vd.year ? ` · ${vd.year}` : ''}${review ? ' marked for review' : ' added!'}`)
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to add')
       setItemStates(prev => ({ ...prev, [key]: 'idle' }))
@@ -705,11 +718,16 @@ export function DiscoverPage() {
 
   const handleSkip = (key: string) => setItemStates(prev => ({ ...prev, [key]: 'skipped' }))
 
+  const handleReview = (key: string, version: ScrapedVersion | null) => handleApprove(key, version, true)
+
   const handleAddAll = async () => {
     const rows = versions.length > 0
-      ? displayVersions.map((v, i) => ({ key: itemKey(i), v }))
+      ? versions.map((v, i) => ({ key: itemKey(i), v }))
       : [{ key: itemKey('casting'), v: null as ScrapedVersion | null }]
-    const toAdd = rows.filter(({ key }) => (itemStates[key] ?? 'idle') === 'idle')
+    const toAdd = rows.filter(({ key, v }) =>
+      (itemStates[key] ?? 'idle') === 'idle' &&
+      !(v as ScrapedVersion & { in_db?: boolean } | null)?.in_db
+    )
     for (const { key, v } of toAdd) await handleApprove(key, v)
   }
 
@@ -733,8 +751,11 @@ export function DiscoverPage() {
     return s === 'added' || s === 'skipped'
   })
 
-  const idleCount = (versions.length > 0 ? displayVersions : [null])
-    .filter((_, i) => (itemStates[itemKey(versions.length > 0 ? i : 'casting')] ?? 'idle') === 'idle').length
+  const idleCount = (versions.length > 0 ? versions : [null])
+    .filter((v, i) =>
+      (itemStates[itemKey(versions.length > 0 ? i : 'casting')] ?? 'idle') === 'idle' &&
+      !(v as ScrapedVersion & { in_db?: boolean } | null)?.in_db
+    ).length
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -1003,7 +1024,7 @@ export function DiscoverPage() {
                   className="flex items-center gap-1 text-xs text-hw-accent hover:text-hw-accent-hover transition-colors font-medium"
                 >
                   <ChevronsRight className="w-3.5 h-3.5" />
-                  Add all ({idleCount})
+                  Add all versions ({idleCount})
                 </button>
               )}
             </div>
@@ -1020,6 +1041,7 @@ export function DiscoverPage() {
                       key={`${currentIdx}-${i}`}
                       castingImageUrl={current.image_url}
                       version={v}
+                      inDb={(v as ScrapedVersion & { in_db?: boolean }).in_db}
                       state={itemStates[key] ?? 'idle'}
                       addToCollection={versionCollect[key] ?? shouldAddToCollection}
                       onToggleCollection={() => toggleCollect(key)}
@@ -1028,6 +1050,7 @@ export function DiscoverPage() {
                       edit={versionEdits[key] || {}}
                       onEditChange={patch => setVersionEdit(key, patch)}
                       onApprove={() => handleApprove(key, v)}
+                      onReview={() => handleReview(key, v)}
                       onSkip={() => handleSkip(key)}
                       allSeries={allSeries}
                     />
@@ -1062,6 +1085,7 @@ export function DiscoverPage() {
                     edit={versionEdits[key] || {}}
                     onEditChange={patch => setVersionEdit(key, patch)}
                     onApprove={() => handleApprove(key, null)}
+                    onReview={() => handleReview(key, null)}
                     onSkip={() => handleSkip(key)}
                     allSeries={allSeries}
                   />

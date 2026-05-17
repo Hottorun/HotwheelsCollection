@@ -12,6 +12,7 @@ import { WishlistPage } from './pages/WishlistPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
 import { DiscoverPage } from './pages/DiscoverPage'
 import { BulkAddPage } from './pages/BulkAddPage'
+import { SeriesPage } from './pages/SeriesPage'
 import { Spinner } from './components/Spinner'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -50,6 +51,7 @@ function AppRoutes() {
         <Route path="/all-cars" element={<AllCarsPage />} />
         <Route path="/wishlist" element={<WishlistPage />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/series" element={<SeriesPage />} />
         <Route path="/discover" element={<DiscoverPage />} />
         <Route path="/bulk-add" element={<BulkAddPage />} />
       </Route>

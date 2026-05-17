@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
-import { Plus, Search, Loader2, X, ImageIcon, ChevronRight, Filter, ExternalLink, Check, Edit } from 'lucide-react'
+import { Plus, Search, Loader2, X, ImageIcon, ChevronRight, Filter, ExternalLink, Check, Edit, CheckCircle2 } from 'lucide-react'
 import { Modal } from './Modal'
 import { InfoTooltip } from './InfoTooltip'
 import {
   createCar,
+  getCars,
   getAllSeries,
   createSeries,
   addToCollection,
@@ -15,7 +16,7 @@ import {
   type ScrapedVersion,
 } from '../lib/api'
 import { useToastContext } from '../contexts/ToastContext'
-import type { Series } from '../types'
+import type { Car, Series } from '../types'
 import { SeriesEditModal } from './SeriesEditModal'
 
 interface AddCarModalProps {
@@ -305,24 +306,34 @@ function SeriesPicker({ series, selectedId, onSelect, onCreateNew, onEditSeries,
 
 function VersionCard({
   version,
+  inDb,
+  selectMode,
+  selected,
   onSelect,
+  onToggle,
 }: {
   version: ScrapedVersion
+  inDb: boolean
+  selectMode: boolean
+  selected: boolean
   onSelect: (v: ScrapedVersion) => void
+  onToggle: (v: ScrapedVersion) => void
 }) {
   const [imgErr, setImgErr] = useState(false)
 
   return (
     <button
       type="button"
-      onClick={() => onSelect(version)}
-      className="
+      onClick={() => selectMode ? onToggle(version) : onSelect(version)}
+      className={`
         flex flex-col gap-1.5 p-2 rounded-lg border border-hw-border bg-hw-bg
         hover:border-hw-accent hover:bg-hw-accent/5 transition-all text-left
         group cursor-pointer
-      "
+        ${inDb ? 'border-emerald-700/50 bg-emerald-950/20' : ''}
+        ${selected ? 'border-hw-accent bg-hw-accent/10' : ''}
+      `}
     >
-      <div className="w-full h-20 rounded-md overflow-hidden bg-hw-surface-hover flex-shrink-0">
+      <div className="relative w-full h-20 rounded-md overflow-hidden bg-hw-surface-hover flex-shrink-0">
         {version.photo_url && !imgErr ? (
           <img
             src={version.photo_url}
@@ -335,6 +346,19 @@ function VersionCard({
           <div className="w-full h-full flex items-center justify-center">
             <ImageIcon className="w-6 h-6 text-hw-muted/40" />
           </div>
+        )}
+        {inDb && (
+          <span className="absolute top-1.5 right-1.5 inline-flex items-center gap-0.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-900/80 text-emerald-200 border border-emerald-600/50">
+            <CheckCircle2 className="w-2.5 h-2.5" />
+            DB
+          </span>
+        )}
+        {selectMode && (
+          <span className={`absolute top-1.5 left-1.5 w-5 h-5 rounded border flex items-center justify-center ${
+            selected ? 'bg-hw-accent border-hw-accent text-white' : 'bg-black/60 border-white/30 text-transparent'
+          }`}>
+            <Check className="w-3.5 h-3.5" />
+          </span>
         )}
       </div>
       <div className="min-w-0">
@@ -367,12 +391,20 @@ function VersionCard({
 interface VersionPickerProps {
   versions: ScrapedVersion[]
   castingName: string
+  isVersionInDb: (version: ScrapedVersion) => boolean
   onSelect: (v: ScrapedVersion) => void
+  onAddAll: (versions: ScrapedVersion[]) => void
   onClose: () => void
 }
 
-function VersionPicker({ versions, castingName, onSelect, onClose }: VersionPickerProps) {
+function VersionPicker({ versions, castingName, isVersionInDb, onSelect, onAddAll, onClose }: VersionPickerProps) {
   const [search, setSearch] = useState('')
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set())
+  const [addingSelected, setAddingSelected] = useState(false)
+
+  const versionKey = (v: ScrapedVersion, indexHint = 0) =>
+    [v.toy_number, v.year, v.color, v.series_name, v.series_number, v.set_number, indexHint].filter(Boolean).join('|')
 
   const filtered = search.trim()
     ? versions.filter(v =>
@@ -391,6 +423,28 @@ function VersionPicker({ versions, castingName, onSelect, onClose }: VersionPick
   const sortedYears = Object.keys(grouped)
     .map(Number)
     .sort((a, b) => b - a)
+
+  const enterSelectMode = () => {
+    const defaults = new Set<string>()
+    filtered.forEach((v, i) => {
+      if (v.photo_url && !isVersionInDb(v)) defaults.add(versionKey(v, i))
+    })
+    setSelectedKeys(defaults)
+    setSelectMode(true)
+  }
+
+  const toggleSelected = (version: ScrapedVersion) => {
+    const idx = filtered.indexOf(version)
+    const key = versionKey(version, idx)
+    setSelectedKeys(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
+
+  const selectedVersions = filtered.filter((v, i) => selectedKeys.has(versionKey(v, i)))
 
   return (
     <div className="flex flex-col h-full">
@@ -421,9 +475,26 @@ function VersionPicker({ versions, castingName, onSelect, onClose }: VersionPick
             autoFocus
           />
         </div>
-        <p className="text-[10px] text-hw-muted mt-1.5">
-          {filtered.length} version{filtered.length !== 1 ? 's' : ''}
-        </p>
+        <div className="flex items-center justify-between gap-2 mt-1.5">
+          <p className="text-[10px] text-hw-muted">
+            {filtered.length} version{filtered.length !== 1 ? 's' : ''}
+            {filtered.some(isVersionInDb) ? ` · ${filtered.filter(isVersionInDb).length} in catalog` : ''}
+          </p>
+          {filtered.length > 1 && !selectMode && (
+            <button
+              type="button"
+              onClick={enterSelectMode}
+              className="text-[10px] font-semibold text-hw-accent hover:text-hw-orange transition-colors"
+            >
+                Select shown
+            </button>
+          )}
+          {selectMode && (
+            <p className="text-[10px] text-hw-accent font-semibold">
+              {selectedVersions.length} selected
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Version grid — scrollable */}
@@ -437,13 +508,59 @@ function VersionPicker({ versions, castingName, onSelect, onClose }: VersionPick
               {year}
             </p>
             <div className="grid grid-cols-2 gap-2">
-              {grouped[year].map((v, i) => (
-                <VersionCard key={`${year}-${i}`} version={v} onSelect={onSelect} />
-              ))}
+              {grouped[year].map((v, i) => {
+                const filteredIndex = filtered.indexOf(v)
+                const key = versionKey(v, filteredIndex >= 0 ? filteredIndex : i)
+                return (
+                  <VersionCard
+                    key={`${year}-${i}`}
+                    version={v}
+                    inDb={isVersionInDb(v)}
+                    selectMode={selectMode}
+                    selected={selectedKeys.has(key)}
+                    onSelect={onSelect}
+                    onToggle={toggleSelected}
+                  />
+                )
+              })}
             </div>
           </div>
         ))}
       </div>
+
+      {selectMode && (
+        <div className="flex-shrink-0 border-t border-hw-border p-3 flex gap-2 bg-hw-surface">
+          <button
+            type="button"
+            onClick={() => { setSelectMode(false); setSelectedKeys(new Set()) }}
+            className="btn-secondary flex-1 justify-center text-sm"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={async () => {
+              setAddingSelected(true)
+              try {
+                await onAddAll(selectedVersions)
+              } finally {
+                setAddingSelected(false)
+              }
+            }}
+            disabled={selectedVersions.length === 0 || addingSelected}
+            className="btn-primary flex-1 justify-center text-sm"
+          >
+            {addingSelected ? (
+              <>
+                <Loader2 className="w-4 h-4 animate-spin" />
+                Adding...
+              </>
+            ) : (
+              'Add selected'
+            )}
+          </button>
+        </div>
+      )}
     </div>
   )
 }
@@ -481,6 +598,7 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
   const [versions, setVersions] = useState<ScrapedVersion[]>([])
   const [castingName, setCastingName] = useState('')
   const [showVersionPicker, setShowVersionPicker] = useState(false)
+  const [existingVersionKeys, setExistingVersionKeys] = useState<Set<string>>(new Set())
 
   // Series picker state
   const [showSeriesPicker, setShowSeriesPicker] = useState(false)
@@ -492,6 +610,43 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
   const appliedVersionCountRef = useRef(0)
 
   const selectedSeries = series.find(s => s.id === form.series_id)
+
+  const normalizeVersionIdentity = useCallback((value?: string | number) =>
+    String(value ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim(),
+  [])
+
+  const versionKeys = useCallback((name: string, version: ScrapedVersion) => {
+    const keys: string[] = []
+    const toy = normalizeVersionIdentity(version.toy_number)
+    if (toy) keys.push(`toy:${toy}`)
+    keys.push([
+      'sig',
+      normalizeVersionIdentity(name),
+      normalizeVersionIdentity(version.year),
+      normalizeVersionIdentity(version.color),
+      normalizeVersionIdentity(version.series_name),
+    ].join('|'))
+    return keys
+  }, [normalizeVersionIdentity])
+
+  const carKeys = useCallback((car: Car) => {
+    const keys: string[] = []
+    const toy = normalizeVersionIdentity(car.toy_number)
+    if (toy) keys.push(`toy:${toy}`)
+    keys.push([
+      'sig',
+      normalizeVersionIdentity(car.name),
+      normalizeVersionIdentity(car.year),
+      normalizeVersionIdentity(car.primary_color),
+      normalizeVersionIdentity(car.series?.name),
+    ].join('|'))
+    return keys
+  }, [normalizeVersionIdentity])
+
+  const isVersionInDb = useCallback((version: ScrapedVersion) => {
+    const name = castingName || form.name
+    return versionKeys(name, version).some(key => existingVersionKeys.has(key))
+  }, [castingName, existingVersionKeys, form.name, versionKeys])
 
   useEffect(() => {
     if (isOpen) {
@@ -522,9 +677,30 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
     setVersions([])
     setCastingName('')
     setShowVersionPicker(false)
+    setExistingVersionKeys(new Set())
     setShowSeriesPicker(false)
     setCarCode('')
   }, [])
+
+  useEffect(() => {
+    if (!showVersionPicker || versions.length === 0) {
+      setExistingVersionKeys(new Set())
+      return
+    }
+
+    let cancelled = false
+    const name = castingName || form.name
+    getCars({ search: name, page_size: 9999 })
+      .then((page) => {
+        if (cancelled) return
+        setExistingVersionKeys(new Set((page.items ?? []).flatMap(carKeys)))
+      })
+      .catch(() => {
+        if (!cancelled) setExistingVersionKeys(new Set())
+      })
+
+    return () => { cancelled = true }
+  }, [carKeys, castingName, form.name, showVersionPicker, versions.length])
 
   const handleClose = () => {
     reset()
@@ -746,7 +922,7 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
       set_number: v.set_number ? String(v.set_number) : prev.set_number,
       series_number: v.series_number ? String(v.series_number) : prev.series_number,
       toy_number: v.toy_number || prev.toy_number,
-      series_id: seriesMatch ? seriesMatch.id : prev.series_id,
+      series_id: seriesMatch ? seriesMatch.id : '',
       new_series_name: isNewSeries ? v.series_name! : '',
       new_series_type: isNewSeries ? (isCollectorSeries ? 'collector' : isPremiumSeries ? 'premium' : prev.new_series_type) : prev.new_series_type,
       // For TH toggle: premium series can't be TH
@@ -764,6 +940,92 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
 
     setShowVersionPicker(false)
     toast.success(`Version selected: ${v.year} ${v.color || ''}`.trim())
+  }
+
+  const handleAddAllVersions = async (selectedVersions: ScrapedVersion[]) => {
+    const name = form.name.trim() || castingName.trim()
+    if (!name) {
+      toast.error('Car name is required')
+      return
+    }
+    if (!selectedVersions.length || submitting) return
+
+    setSubmitting(true)
+    try {
+      const normalizeSeriesName = (s: string) =>
+        s.toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\b\d{4}\b/g, '').trim()
+      const normalizeIdentity = (value?: string | number) =>
+        String(value ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim()
+      const existing = await getCars({ search: name, page_size: 9999 }).catch(() => ({ items: [] }))
+      const existingCars = existing.items ?? []
+      const isExistingVersion = (v: ScrapedVersion) => {
+        const toy = normalizeIdentity(v.toy_number)
+        return existingCars.some(car => {
+          if (toy && normalizeIdentity(car.toy_number) === toy) return true
+          return (
+            normalizeIdentity(car.name) === normalizeIdentity(name) &&
+            normalizeIdentity(car.year) === normalizeIdentity(v.year) &&
+            normalizeIdentity(car.primary_color) === normalizeIdentity(v.color) &&
+            normalizeIdentity(car.series?.name) === normalizeIdentity(v.series_name)
+          )
+        })
+      }
+
+      let seriesCache = [...series]
+      let added = 0
+      let skipped = 0
+
+      const ensureSeries = async (v: ScrapedVersion): Promise<string | undefined> => {
+        const sName = v.series_name?.trim()
+        if (!sName) return form.series_id || undefined
+
+        const match = seriesCache.find(s => normalizeSeriesName(s.name) === normalizeSeriesName(sName))
+        if (match) return match.id
+
+        const isCollectorSeries = /rlc|red line club|collector|hw collectors|convention/i.test(sName)
+        const isPremiumSeries = isCollectorSeries || /car culture|boulevard|pop culture|fast[ &]furious|hw exotics/i.test(sName)
+        const newSeries = await createSeries({
+          name: sName,
+          type: isCollectorSeries ? 'collector' : isPremiumSeries ? 'premium' : 'mainline',
+          total_count: v.series_total,
+        })
+        seriesCache = [...seriesCache, newSeries]
+        setSeries(prev => [...prev, newSeries])
+        return newSeries.id
+      }
+
+      for (const v of selectedVersions) {
+        if (isExistingVersion(v)) {
+          skipped += 1
+          continue
+        }
+        const series_id = await ensureSeries(v)
+        const resolvedSeries = seriesCache.find(s => s.id === series_id)
+        const car_type = v.car_type || resolvedSeries?.type || 'mainline'
+        await createCar({
+          name,
+          series_id,
+          year: v.year,
+          toy_number: v.toy_number || undefined,
+          primary_color: v.color || undefined,
+          set_number: v.set_number,
+          series_number: v.series_number,
+          car_type,
+          treasure_hunt: car_type === 'treasure hunt' || car_type === 'super treasure hunt',
+          image_url: v.photo_url || wikiImageUrl || undefined,
+        })
+        added += 1
+      }
+
+      toast.success(`${added} version${added !== 1 ? 's' : ''} added to catalog${skipped ? ` · ${skipped} skipped` : ''}`)
+      reset()
+      onSuccess?.()
+      onClose()
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to add versions')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   // ── Submit ──────────────────────────────────────────────────────────────────
@@ -1327,7 +1589,9 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
             <VersionPicker
               versions={versions}
               castingName={castingName}
+              isVersionInDb={isVersionInDb}
               onSelect={handleVersionSelect}
+              onAddAll={handleAddAllVersions}
               onClose={() => setShowVersionPicker(false)}
             />
           </div>

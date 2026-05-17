@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import { X, Camera, Save, Loader2, Flame, ImageIcon, Search, Plus, Check, Edit, Minus, Trash2 } from 'lucide-react'
+import { X, Camera, Save, Loader2, Flame, ImageIcon, Search, Plus, Check, Edit, Minus, Trash2, BadgeAlert } from 'lucide-react'
 import {
   updateCar, getAllSeries, uploadCarImage,
   updateCollectionEntry, createSeries, removeFromCollection,
@@ -7,6 +7,7 @@ import {
 import { InfoTooltip } from './InfoTooltip'
 import { SeriesEditModal } from './SeriesEditModal'
 import { useToastContext } from '../contexts/ToastContext'
+import { addReviewNote, isMarkedForReview, removeReviewNote } from '../lib/review'
 import type { Car, Series, CollectionEntry } from '../types'
 
 interface CarDetailModalProps {
@@ -327,6 +328,16 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
     }
   }
 
+  const toggleReview = () => {
+    setColForm(prev => {
+      const active = isMarkedForReview(prev.notes)
+      return {
+        ...prev,
+        notes: active ? removeReviewNote(prev.notes) : addReviewNote(prev.notes),
+      }
+    })
+  }
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file || !car) return
@@ -393,7 +404,7 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
             amount_owned: total || 1,
             carded: colForm.carded_qty > 0,
             condition: colForm.condition,
-            notes: colForm.notes || undefined,
+            notes: colForm.notes,
             date_acquired: colForm.date_acquired || undefined,
           })
           onCollectionUpdate?.(updatedCol)
@@ -804,6 +815,24 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
                   </div>
 
                   {/* Notes + Date in a grid */}
+                  <button
+                    type="button"
+                    onClick={toggleReview}
+                    className={`w-full rounded-xl border px-3 py-2.5 flex items-center justify-between gap-3 transition-all ${
+                      isMarkedForReview(colForm.notes)
+                        ? 'border-amber-600/50 bg-amber-950/30 text-amber-200'
+                        : 'border-hw-border bg-hw-bg text-hw-muted hover:border-amber-700/50 hover:text-amber-300'
+                    }`}
+                  >
+                    <span className="inline-flex items-center gap-2 text-sm font-semibold">
+                      <BadgeAlert className="w-4 h-4" />
+                      For review
+                    </span>
+                    <span className={`relative w-10 h-5 rounded-full transition-colors ${isMarkedForReview(colForm.notes) ? 'bg-amber-500' : 'bg-hw-border'}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${isMarkedForReview(colForm.notes) ? 'translate-x-5' : 'translate-x-0'}`} />
+                    </span>
+                  </button>
+
                   <div className="grid grid-cols-2 gap-3">
                     <div>
                       <label className="label text-[11px]">Date Acquired</label>

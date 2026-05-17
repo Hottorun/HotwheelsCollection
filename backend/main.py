@@ -4,7 +4,7 @@ import os
 import re
 from datetime import date
 from typing import Optional, Literal
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -129,9 +129,29 @@ def get_cars(
     page_size: int = 20,
     user=Depends(get_current_user),
 ):
+    def _escape_or_value(value: str) -> str:
+        return value.replace("\\", "\\\\").replace(",", "\\,")
+
     def apply_filters(q):
         if search:
-            q = q.or_(f"name.ilike.%{search}%,toy_number.ilike.%{search}%")
+            term = search.strip()
+            year_match = re.search(r"\b(19|20)\d{2}\b", term)
+            if year_match:
+                q = q.eq("year", int(year_match.group(0)))
+                name_term = re.sub(r"\b(19|20)\d{2}\b", " ", term)
+                name_term = re.sub(r"[()'\u2018\u2019\"`]", " ", name_term)
+                name_term = re.sub(r"\s+", " ", name_term).strip()
+                if name_term:
+                    for part in name_term.split():
+                        if len(part) > 1:
+                            q = q.ilike("name", f"%{part}%")
+            else:
+                clauses = [
+                    f"name.ilike.%{_escape_or_value(term)}%",
+                    f"toy_number.ilike.%{_escape_or_value(term)}%",
+                    f"primary_color.ilike.%{_escape_or_value(term)}%",
+                ]
+                q = q.or_(",".join(clauses))
         if series_id:
             q = q.eq("series_id", series_id)
         if year:
@@ -442,7 +462,8 @@ def get_analytics(user=Depends(get_current_user)):
     for e in collection:
         color = (e.get("all_cars") or {}).get("primary_color")
         if color:
-            color_counts[color] = color_counts.get(color, 0) + e.get("amount_owned", 1)
+            bucket = _color_bucket(color)
+            color_counts[bucket] = color_counts.get(bucket, 0) + e.get("amount_owned", 1)
     top_colors = sorted(color_counts.items(), key=lambda x: x[1], reverse=True)[:8]
 
     owned_per_series: dict[str, int] = {}
@@ -613,6 +634,32 @@ def _chw_img_url(gallery_image: str) -> str:
     return ""
 
 
+_COLOR_BUCKETS: list[tuple[str, tuple[str, ...]]] = [
+    ("Black", ("black",)),
+    ("White", ("white", "pearl")),
+    ("Silver", ("silver", "chrome")),
+    ("Gray", ("gray", "grey", "gunmetal")),
+    ("Red", ("red", "maroon", "burgundy")),
+    ("Blue", ("blue", "aqua", "cyan")),
+    ("Green", ("green", "lime")),
+    ("Yellow", ("yellow",)),
+    ("Orange", ("orange",)),
+    ("Purple", ("purple", "violet")),
+    ("Pink", ("pink", "magenta")),
+    ("Gold", ("gold",)),
+    ("Brown", ("brown", "bronze", "copper")),
+    ("Tan", ("tan", "beige", "cream")),
+]
+
+
+def _color_bucket(color: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", " ", color.lower()).strip()
+    for label, keywords in _COLOR_BUCKETS:
+        if any(re.search(rf"\b{re.escape(keyword)}\b", normalized) for keyword in keywords):
+            return label
+    return color.strip().title()
+
+
 _PREMIUM_SERIES_KEYWORDS = [
     "boulevard", "car culture", "retro entertainment", "pop culture",
     "vintage racing club", "hw id", "pantone", "detroit muscle",
@@ -716,7 +763,7 @@ async def _chw_search_cached(client: httpx.AsyncClient, q: str) -> list[dict]:
 
 _NON_CASTING_PATTERNS = re.compile(
     r"""
-    ^\d{4}\s         # starts with year: "2024 Hot Wheels..."
+    ^\d{4}\s+hot\s+wheels\b  # starts like "2024 Hot Wheels..."
     | \bseries\b     # contains "series"
     | ^list\s+of\b   # "List of..."
     | \(disambiguation\)
@@ -730,7 +777,7 @@ _NON_CASTING_PATTERNS = re.compile(
     | \bsuperchargers?\b
     | \bplaysets?\b
     | \baccesories?\b
-    | \bpacks?\b      # "5 Pack", "Gift Pack"
+    | \b(?:\d+\s*)?packs?\b      # "5 Pack", "Gift Pack"
     """,
     re.VERBOSE | re.IGNORECASE,
 )
@@ -780,11 +827,22 @@ async def _wiki_search(client: httpx.AsyncClient, q: str, limit: int = 10) -> li
     # try a title-cased variant (each word's first letter uppercased) to handle
     # queries typed in lowercase.
     def _title_variants(s: str) -> list[str]:
-        base = s.replace(" ", "_")
-        titled = "_".join(w[:1].upper() + w[1:] for w in s.split()).replace(" ", "_")
-        variants: list[str] = list(dict.fromkeys([base, titled]))  # preserve order, dedupe
-        if "'" in base:  # also try curly left quote used by wiki for '69, '96, etc.
-            variants += [v.replace("'", "\u2018") for v in variants]
+        cleaned = re.sub(r"\s+", " ", s.strip())
+        no_year = re.sub(r"^\d{4}\s+", "", cleaned).strip()
+        no_wrapping_punct = re.sub(r"[\"`]", "", cleaned)
+        bases = [cleaned, no_year, no_wrapping_punct]
+        bases += [re.sub(r"\((['\u2018\u2019]?)([^)]+)\)", r"(\2)", b).strip() for b in bases]
+        bases = [b for b in dict.fromkeys(bases) if b]
+
+        variants: list[str] = []
+        for source in bases:
+            base = source.replace(" ", "_")
+            titled = "_".join(w[:1].upper() + w[1:] for w in source.split()).replace(" ", "_")
+            variants += [base, titled]
+            if "'" in base:
+                variants += [v.replace("'", "\u2018") for v in [base, titled]]
+            if "\u2018" in base or "\u2019" in base:
+                variants += [v.replace("\u2018", "'").replace("\u2019", "'") for v in [base, titled]]
         return list(dict.fromkeys(variants))
 
     try:
@@ -792,7 +850,7 @@ async def _wiki_search(client: httpx.AsyncClient, q: str, limit: int = 10) -> li
             tr = await client.get(
                 f"{WIKI_BASE}/api.php",
                 params={"action": "query", "titles": direct_title,
-                        "prop": "pageimages", "pithumbsize": "300", "format": "json"},
+                        "redirects": "true", "prop": "pageimages", "pithumbsize": "300", "format": "json"},
                 headers=HEADERS,
                 timeout=10,
             )
@@ -815,15 +873,29 @@ async def _wiki_search(client: httpx.AsyncClient, q: str, limit: int = 10) -> li
         pass
     # Direct lookup found nothing — fall through to full-text search
 
+    search_terms = list(dict.fromkeys([
+        q.strip(),
+        re.sub(r"^\d{4}\s+", "", q.strip()).strip(),
+        re.sub(r"[()'\u2018\u2019\"`]", " ", q.strip()).strip(),
+        re.sub(r"[()'\u2018\u2019\"`]", " ", re.sub(r"^\d{4}\s+", "", q.strip())).strip(),
+    ]))
+
+    data = None
     try:
-        search_url = (
-            f"{WIKI_BASE}/api.php"
-            f"?action=query&list=search&srsearch={quote(q.strip())}&srlimit={limit}&format=json"
-        )
-        resp = await client.get(search_url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-        data = resp.json()
+        for term in [t for t in search_terms if t]:
+            search_url = (
+                f"{WIKI_BASE}/api.php"
+                f"?action=query&list=search&srsearch={quote(term)}&srlimit={limit}&format=json"
+            )
+            resp = await client.get(search_url, headers=HEADERS, timeout=10)
+            resp.raise_for_status()
+            candidate = resp.json()
+            if candidate.get("query", {}).get("search"):
+                data = candidate
+                break
     except Exception:
+        return []
+    if data is None:
         return []
 
     search_items = [
@@ -1335,13 +1407,13 @@ def _parse_versions(soup: BeautifulSoup) -> list[dict]:
 async def scrape_car(url: str, user=Depends(get_current_user)):
     """Fetch structured car data from a Hot Wheels wiki page via the MediaWiki API."""
     # Extract page name from URL: ".../wiki/Bone_Shaker" → "Bone_Shaker"
-    page_name = urlparse(url).path.split("/wiki/")[-1]
+    page_name = unquote(urlparse(url).path.split("/wiki/")[-1])
     if not page_name:
         raise HTTPException(status_code=400, detail="Invalid wiki URL")
 
     api_url = (
         f"{WIKI_BASE}/api.php"
-        f"?action=parse&page={page_name}&prop=text|categories&format=json"
+        f"?action=parse&page={quote(page_name)}&redirects=true&prop=text|categories&format=json"
     )
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(api_url, headers=HEADERS)

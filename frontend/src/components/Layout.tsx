@@ -12,6 +12,7 @@ import {
   Sun,
   Moon,
   Compass,
+  Layers,
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -21,6 +22,7 @@ import { useSearch } from '../contexts/SearchContext'
 const navItems = [
   { to: '/collection', label: 'Collection', icon: LayoutGrid },
   { to: '/all-cars', label: 'All Cars', icon: Library },
+  { to: '/series', label: 'Series', icon: Layers },
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/wishlist', label: 'Wishlist', icon: Heart },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },

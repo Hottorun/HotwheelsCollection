@@ -4,8 +4,11 @@ import {
   Heart,
   Plus,
   CheckCircle2,
+  BadgeAlert,
 } from 'lucide-react'
 import type { Car, CollectionEntry, WishlistEntry } from '../types'
+import { colorToCss } from '../lib/colors'
+import { isMarkedForReview } from '../lib/review'
 
 interface CarCardProps {
   car: Car
@@ -60,6 +63,7 @@ export function CarCard({
   const [imgError, setImgError] = useState(false)
   const isOwned = !!collectionEntry
   const isWishlisted = !!wishlistEntry
+  const forReview = isMarkedForReview(collectionEntry?.notes)
 
   return (
     <div
@@ -85,16 +89,16 @@ export function CarCard({
 
         {/* Badges top-left */}
         <div className="absolute top-2 left-2 flex flex-col gap-1">
-          {car.treasure_hunt && (
-            <span className="badge bg-yellow-500/90 text-yellow-900 font-bold shadow-lg">
-              <Flame className="w-3 h-3" />
-              TH
-            </span>
-          )}
           {isOwned && (
             <span className="badge bg-emerald-500/90 text-emerald-900 font-bold">
               <CheckCircle2 className="w-3 h-3" />
               {collectionEntry!.amount_owned > 1 ? `×${collectionEntry!.amount_owned}` : 'Owned'}
+            </span>
+          )}
+          {forReview && (
+            <span className="badge bg-amber-500/90 text-amber-950 font-bold">
+              <BadgeAlert className="w-3 h-3" />
+              Review
             </span>
           )}
         </div>
@@ -138,6 +142,12 @@ export function CarCard({
           <div className="flex-1">
             <h3 className="font-semibold text-sm text-hw-text leading-tight line-clamp-2 flex items-center gap-1.5">
               {car.name}
+              {car.treasure_hunt && (
+                <span className="inline-flex items-center gap-0.5 text-[10px] font-bold px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-500 border border-yellow-500/30 flex-shrink-0">
+                  <Flame className="w-3 h-3" />
+                  TH
+                </span>
+              )}
               {car.series?.type === 'premium' && (
                 <span className="text-[10px] font-bold px-1 py-0.5 rounded bg-amber-900/50 text-amber-300 border border-amber-700/30">
                   P
@@ -161,7 +171,7 @@ export function CarCard({
             <span className="flex items-center gap-1.5">
               <span
                 className="w-2.5 h-2.5 rounded-full flex-shrink-0 ring-1 ring-white/20"
-                style={{ backgroundColor: car.primary_color.toLowerCase() }}
+                style={{ backgroundColor: colorToCss(car.primary_color) }}
               />
               {car.primary_color}
             </span>
@@ -191,6 +201,11 @@ export function CarCard({
             <span className="text-xs text-hw-text-secondary">
               {collectionEntry!.carded ? 'Carded' : 'Loose'} · {collectionEntry!.condition}
             </span>
+            {forReview && (
+              <span className="ml-auto text-[10px] font-bold px-1.5 py-0.5 rounded border border-amber-600/40 bg-amber-950/30 text-amber-300">
+                Review
+              </span>
+            )}
           </div>
         )}
       </div>

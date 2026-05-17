@@ -9,6 +9,7 @@ import {
   Upload,
   Trash2,
   CopyCheck,
+  EyeOff,
 } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { CarCard } from '../components/CarCard'
@@ -57,6 +58,14 @@ export function AllCarsPage() {
   const [viewMode, setViewMode] = useState<'grid' | 'series'>('grid')
   const [duplicateMode, setDuplicateMode] = useState(false)
   const [resolvingDuplicates, setResolvingDuplicates] = useState(false)
+  const [ignoredDuplicateKeys, setIgnoredDuplicateKeys] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('hw_ignored_duplicate_groups')
+      return raw ? new Set(JSON.parse(raw)) : new Set()
+    } catch {
+      return new Set()
+    }
+  })
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set())
   const [wishlistPending, setWishlistPending] = useState<Set<string>>(new Set())
   const [addCarOpen, setAddCarOpen] = useState(false)
@@ -101,14 +110,16 @@ export function AllCarsPage() {
       String(value ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, ' ').trim()
 
     const keyFor = (car: Car) => {
-      const toy = normalize(car.toy_number)
-      if (toy) return `toy:${toy}`
       return [
         'sig',
         normalize(car.name),
         normalize(car.year),
         normalize(car.primary_color),
         normalize(car.series_id),
+        normalize(car.series_number),
+        normalize(car.set_number),
+        normalize(car.toy_number),
+        normalize(car.car_type),
       ].join('|')
     }
 
@@ -120,15 +131,32 @@ export function AllCarsPage() {
       groups.set(key, list)
     })
 
-    return [...groups.values()]
-      .filter((group) => group.length > 1)
-      .sort((a, b) => a[0].name.localeCompare(b[0].name))
-  }, [cars])
+    return [...groups.entries()]
+      .filter(([key, group]) => group.length > 1 && !ignoredDuplicateKeys.has(key))
+      .map(([key, cars]) => ({ key, cars }))
+      .sort((a, b) => a.cars[0].name.localeCompare(b.cars[0].name))
+  }, [cars, ignoredDuplicateKeys])
 
   const duplicateCars = useMemo(
-    () => duplicateGroups.flatMap((group) => group),
+    () => duplicateGroups.flatMap((group) => group.cars),
     [duplicateGroups]
   )
+
+  const handleIgnoreDuplicateGroup = useCallback((groupKey: string) => {
+    setIgnoredDuplicateKeys((prev) => {
+      const next = new Set(prev)
+      next.add(groupKey)
+      try { localStorage.setItem('hw_ignored_duplicate_groups', JSON.stringify([...next])) } catch {}
+      return next
+    })
+    toast.success('Duplicate group ignored')
+  }, [toast])
+
+  const handleClearIgnoredDuplicates = useCallback(() => {
+    setIgnoredDuplicateKeys(new Set())
+    try { localStorage.removeItem('hw_ignored_duplicate_groups') } catch {}
+    toast.success('Ignored duplicate groups reset')
+  }, [toast])
 
   const handleDeleteDuplicate = useCallback(async (car: Car) => {
     if (deletingIds.has(car.id)) return
@@ -331,6 +359,15 @@ export function AllCarsPage() {
             {resolvingDuplicates ? 'Done resolving' : 'Resolve duplicates'}
           </button>
         )}
+
+        {duplicateMode && ignoredDuplicateKeys.size > 0 && (
+          <button
+            onClick={handleClearIgnoredDuplicates}
+            className="btn-ghost text-xs text-hw-muted hover:text-hw-text"
+          >
+            Show ignored ({ignoredDuplicateKeys.size})
+          </button>
+        )}
       </div>
 
       {/* Expanded filters */}
@@ -444,16 +481,24 @@ export function AllCarsPage() {
             </div>
           )}
           {duplicateGroups.map((group, groupIndex) => (
-            <div key={`${group[0].name}-${groupIndex}`}>
+            <div key={`${group.key}-${groupIndex}`}>
               <div className="flex items-center gap-3 mb-3">
                 <h3 className="text-sm font-semibold text-hw-text-secondary uppercase tracking-wider truncate">
-                  {group[0].toy_number ? `Toy # ${group[0].toy_number}` : group[0].name}
+                  {group.cars[0].toy_number ? `Toy # ${group.cars[0].toy_number}` : group.cars[0].name}
                 </h3>
-                <span className="text-xs text-hw-muted">{group.length} entries</span>
+                <span className="text-xs text-hw-muted">{group.cars.length} entries</span>
                 <div className="flex-1 h-px bg-hw-border" />
+                <button
+                  onClick={() => handleIgnoreDuplicateGroup(group.key)}
+                  className="inline-flex items-center gap-1 text-xs text-hw-muted hover:text-hw-text transition-colors"
+                  title="Ignore this duplicate group"
+                >
+                  <EyeOff className="w-3.5 h-3.5" />
+                  Ignore
+                </button>
               </div>
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-                {group.map((car) => (
+                {group.cars.map((car) => (
                   <div key={car.id} className="relative">
                     <CarCard
                       car={car}

@@ -9,7 +9,11 @@ import type {
   PaginatedResponse,
 } from '../types'
 
-export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+// `??` rather than `||` on purpose: when the app is served by the nginx
+// container it is built with VITE_API_URL="" so that requests go to the same
+// origin and get proxied to the backend. An empty string is a meaningful value
+// here, and `||` would wrongly fall through to localhost.
+export const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
 /**
  * Car images are stored on the NAS and come back as a root-relative path

@@ -1,7 +1,15 @@
 # Hot Wheels Collection Tracker — NAS stack.
 #
-#   cp .env.example .env    # then fill in the three CHANGE_ME values
+#   cp .env.example .env    # then fill in the two CHANGE_ME values
 #   docker compose up -d
+#
+# Open the frontend service in a browser (FRONTEND_PORT, default 18080). The
+# backend port serves the API only and has no page at /.
+#
+# Deploy this with `docker compose` from the command line. Importing it into a
+# NAS Docker UI tends to generate a second compose file alongside this one and
+# manage the containers under its own project name, after which the CLI and the
+# UI disagree about what is running.
 #
 # Data lives in two named volumes, pgdata and car-images. Those are the only
 # things that matter for backups — see migration/backup.sh.
@@ -44,6 +52,8 @@ services:
     volumes:
       - car-images:/data/car-images
     ports:
+      # Only needed for direct API access and debugging — the app itself reaches
+      # the backend through the frontend container's proxy.
       - "${BACKEND_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/health || exit 1"]
@@ -51,6 +61,22 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # This is the one you open in a browser. Serves the built React app and
+  # proxies /api and /images to the backend, so everything is one origin.
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-18080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
 
 volumes:
   pgdata:

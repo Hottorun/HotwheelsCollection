@@ -52,23 +52,55 @@ Fill in the two `CHANGE_ME` values. Generate each one with:
 python3 -c 'import secrets; print(secrets.token_urlsafe(48))'
 ```
 
-Set `ALLOWED_ORIGINS` to wherever the frontend is served from. It must match the
-browser's address bar exactly — scheme, host, and port — or the browser blocks
-the API calls.
+**Check the ports.** A NAS has a lot of ports already spoken for — both by the
+OS itself and by other apps (on this NAS, UGOS takes 8000 and `upsnap` holds
+8090). Pick free ones before starting:
+
+```bash
+for p in 18080 8000 8082 8095; do
+  (sudo ss -tln | grep -q ":$p " && echo "$p TAKEN") || echo "$p free"
+done
+```
+
+Set `FRONTEND_PORT` and `BACKEND_PORT` in `.env` to whatever came back free.
+
+You can leave `ALLOWED_ORIGINS` alone when using the bundled frontend container:
+the browser talks to the API on the same origin as the page, so CORS never
+comes into it.
 
 ### 3. Start it
 
+Use the command line, **not** the NAS's Docker UI:
+
 ```bash
-docker compose up -d
+cd /volume2/docker/HotwheelsCollection
+docker compose up -d --build
 ```
+
+> **Why not the UI?** Importing this stack into the UGREEN Docker UI writes its
+> own `docker-compose.yaml` next to the `docker-compose.yml` in the repo, and
+> runs the containers under a project name of its own choosing. After that the
+> CLI and the UI each see a different stack: `docker compose ps` reports nothing
+> running while containers are plainly serving traffic. If that has already
+> happened, see "CLI and UI disagree" in Troubleshooting.
 
 `migration/schema.sql` runs automatically the first time, creating the tables.
-Check it came up:
+
+Three containers come up: `db`, `backend`, and `frontend`. **`frontend` is the
+one you open in a browser** — it serves the app and proxies `/api` and `/images`
+through to the backend.
 
 ```bash
-docker compose ps
-curl http://localhost:8000/api/health     # {"status":"ok"}
+docker compose ps                              # STATUS should say "healthy", not just "Up"
+curl http://localhost:18080/api/health         # {"status":"ok"} — through the proxy
+curl -I http://localhost:18080/                # 200, the app itself
 ```
+
+Then open `http://NAS_IP:18080` in a browser.
+
+> Opening the **backend** port directly (`http://NAS_IP:8000`) shows nothing but
+> `{"detail":"Not Found"}`. That is correct — the backend has no page at `/`, it
+> only answers `/api/*` and `/images/*`. The website is on `FRONTEND_PORT`.
 
 ### 4. Import the data
 
@@ -101,16 +133,91 @@ docker compose cp migration/export/car-images/. backend:/data/car-images/
 docker compose exec backend sh -c 'ls /data/car-images | wc -l'   # expect 412
 ```
 
-### 6. Point the frontend at it
+### 6. Open it
 
-In `frontend/.env`:
+`http://NAS_IP:18080` — log in with the password you set in step 4.
 
+Nothing to configure: the frontend container is built with `VITE_API_URL=""`, so
+the app calls `/api/...` on its own origin and nginx forwards that to the backend.
+
+<details>
+<summary>If you'd rather keep the frontend on Netlify instead</summary>
+
+Set `VITE_API_URL=http://NAS_IP:8000` in Netlify's environment variables, and add
+that Netlify URL to `ALLOWED_ORIGINS` in `.env` — cross-origin means CORS now
+applies. You can drop the `frontend` service from `docker-compose.yml` in that
+case. Note this needs the backend port reachable from the internet, whereas the
+bundled container only needs the one frontend port.
+
+</details>
+
+---
+
+## Troubleshooting
+
+**Nothing loads in the browser.** Check which port you're on. `BACKEND_PORT`
+serves only `/api/*` and `/images/*`; a bare `/` there returns
+`{"detail":"Not Found"}`, which is expected. The website is on `FRONTEND_PORT`.
+
+**A container won't start / port already in use.** A NAS has many ports already
+claimed — UGOS itself uses 8000, and other apps take more (`upsnap` sits on
+8090). Find what's holding a port with `sudo ss -tlnp | grep :PORT`, then change
+`FRONTEND_PORT` / `BACKEND_PORT` in `.env` and `docker compose up -d` again.
+
+**CLI and UI disagree — `docker compose ps` is empty but containers are
+running.** The Docker UI deployed the stack under its own project name, and
+probably from its own generated `docker-compose.yaml` rather than the repo's
+`docker-compose.yml`. Untangle it:
+
+```bash
+docker compose ls -a                    # every project, and the file each uses
+docker ps --format '{{.Names}}\t{{.Ports}}\t{{.Status}}'
 ```
-VITE_API_URL=http://NAS_IP:8000
+
+Stop the UI-managed stack from the UI, delete the stray `docker-compose.yaml`
+(the repo's file is `.yml`), then bring it up from the command line. Removing
+the containers is safe — the data lives in the named volumes, not in them.
+
+**`Connection reset by peer` on a published port.** `ss` shows `docker-proxy`
+holding the port, so it's bound, but the connection dies. Usually this is either
+a stale `docker-proxy` from a container that no longer exists, or `localhost`
+resolving to IPv6 `::1` and taking a different path than IPv4. Test explicitly:
+
+```bash
+curl -v http://127.0.0.1:PORT/api/health   # force IPv4
 ```
 
-Then `npm run build`. Remember to also set `VITE_API_URL` in Netlify's
-environment variables if the frontend stays deployed there.
+If IPv4 works and `localhost` doesn't, it was the IPv6 route. If neither works
+while the container's own healthcheck passes, the port publish is stale —
+`docker compose down && docker compose up -d` re-creates it.
+
+**"Up" but not working.** `Up` only means the process started. Look for
+`healthy` in `docker compose ps`, then:
+
+```bash
+docker compose logs backend --tail 50
+docker compose logs frontend --tail 50
+```
+
+**Login fails for a password you're sure is right.** The accounts only exist
+after step 4. Check with:
+
+```bash
+docker compose exec db psql -U hotwheels -d hotwheels -c 'SELECT email FROM users;'
+```
+
+**Images 404 but data loads.** Step 5 didn't land. Verify:
+
+```bash
+docker compose exec backend sh -c 'ls /data/car-images | wc -l'   # expect 412
+```
+
+**Changed the frontend code and nothing changed.** The app is baked into the
+image at build time, so a rebuild is required:
+
+```bash
+docker compose up -d --build frontend
+```
 
 ---
 

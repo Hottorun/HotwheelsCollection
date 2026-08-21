@@ -3,6 +3,7 @@ import { X, Camera, Save, Loader2, Flame, ImageIcon, Search, Plus, Check, Edit, 
 import {
   updateCar, getAllSeries, uploadCarImage,
   updateCollectionEntry, createSeries, removeFromCollection,
+resolveImageUrl,
 } from '../lib/api'
 import { InfoTooltip } from './InfoTooltip'
 import { SeriesEditModal } from './SeriesEditModal'
@@ -459,7 +460,7 @@ export function CarDetailModal({ isOpen, onClose, car, collectionEntry, onSucces
 
             {imageUrl && !imgError ? (
               <img
-                src={imageUrl}
+                src={resolveImageUrl(imageUrl)}
                 alt={car.name}
                 className="relative z-10 w-full h-full object-contain"
                 onError={() => setImgError(true)}

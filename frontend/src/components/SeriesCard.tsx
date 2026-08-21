@@ -1,5 +1,6 @@
 import { Car, ChevronRight } from 'lucide-react'
 import type { Series } from '../types'
+import { resolveImageUrl } from '../lib/api'
 
 interface SeriesCardProps {
   series: Series
@@ -22,7 +23,7 @@ export function SeriesCard({ series, owned = 0, total, onClick }: SeriesCardProp
         {/* Series icon / image */}
         <div className="w-10 h-10 rounded-lg bg-hw-surface-hover border border-hw-border flex items-center justify-center flex-shrink-0">
           {series.image_url ? (
-            <img src={series.image_url} alt={series.name} className="w-full h-full object-cover rounded-lg" />
+            <img src={resolveImageUrl(series.image_url)} alt={series.name} className="w-full h-full object-cover rounded-lg" />
           ) : (
             <Car className="w-5 h-5 text-hw-muted" />
           )}

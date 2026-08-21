@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import { CheckCircle2, Minus, Plus, Camera, Trash2 } from 'lucide-react'
 import { Modal } from './Modal'
-import { addToCollection, updateCollectionEntry, removeFromCollection, uploadCarImage } from '../lib/api'
+import { addToCollection, updateCollectionEntry, removeFromCollection, uploadCarImage, resolveImageUrl } from '../lib/api'
 import { useToastContext } from '../contexts/ToastContext'
 import type { Car, CollectionEntry } from '../types'
 
@@ -178,7 +178,7 @@ export function AddToCollectionModal({
             <div className="relative w-14 h-14 rounded-lg overflow-hidden bg-zinc-800 flex-shrink-0 group/img">
               {imageUrl && !imgError ? (
                 <img
-                  src={imageUrl}
+                  src={resolveImageUrl(imageUrl)}
                   alt={car.name}
                   className="w-full h-full object-cover"
                   onError={() => setImgError(true)}

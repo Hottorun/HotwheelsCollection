@@ -14,6 +14,7 @@ import {
   toyNumberLookup,
   type ScrapedCar,
   type ScrapedVersion,
+  resolveImageUrl,
 } from '../lib/api'
 import { useToastContext } from '../contexts/ToastContext'
 import type { Car, Series } from '../types'
@@ -1152,7 +1153,7 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
                       className="w-full flex items-center gap-3 px-3 py-2.5 hover:bg-hw-surface-hover transition-colors text-left border-b border-hw-border last:border-0"
                     >
                       {car.image_url ? (
-                        <img src={car.image_url} alt="" className="w-10 h-10 rounded object-contain bg-zinc-900 flex-shrink-0" />
+                        <img src={resolveImageUrl(car.image_url)} alt="" className="w-10 h-10 rounded object-contain bg-zinc-900 flex-shrink-0" />
                       ) : (
                         <div className="w-10 h-10 rounded bg-hw-surface-hover flex-shrink-0" />
                       )}
@@ -1227,7 +1228,7 @@ export function AddCarModal({ isOpen, onClose, onSuccess, preloadedScrape, initi
             <label className="label">Image</label>
             {effectiveImagePreview ? (
               <div className="relative w-full h-40 rounded-lg overflow-hidden border border-hw-border group">
-                <img src={effectiveImagePreview} alt="Preview" className="w-full h-full object-contain bg-hw-bg" />
+                <img src={resolveImageUrl(effectiveImagePreview)} alt="Preview" className="w-full h-full object-contain bg-hw-bg" />
                 <button
                   type="button"
                   onClick={clearImage}

@@ -5,7 +5,9 @@
 - frontend - react?, will prob not work on let ai design / do etc.
 - backend - flask, will work on, sure we want flask, what about bun?
 
-- SQLite db - on supabase
+- Postgres + FastAPI, self-hosted on the NAS via docker compose.
+  Moved off Supabase because free projects pause after 7 days idle.
+  Setup and data migration: see `migration/README.md`.
 
 # things to do:
 - decide frameworks

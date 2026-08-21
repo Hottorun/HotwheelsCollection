@@ -11,7 +11,7 @@ import {
 import { PageSpinner } from '../components/Spinner'
 import { SeriesEditModal } from '../components/SeriesEditModal'
 import { useToastContext } from '../contexts/ToastContext'
-import { createSeries, getAllSeries, getCars } from '../lib/api'
+import { createSeries, getAllSeries, getCars, resolveImageUrl } from '../lib/api'
 import type { Car as CarType, Series } from '../types'
 
 const SERIES_TYPES = ['', 'mainline', 'premium', 'collector']
@@ -255,7 +255,7 @@ export function SeriesPage() {
                   <div className="min-w-0 flex items-center gap-3">
                     <div className="w-9 h-9 rounded-lg bg-hw-bg border border-hw-border flex items-center justify-center flex-shrink-0 overflow-hidden">
                       {item.image_url ? (
-                        <img src={item.image_url} alt={item.name} className="w-full h-full object-cover" />
+                        <img src={resolveImageUrl(item.image_url)} alt={item.name} className="w-full h-full object-cover" />
                       ) : (
                         <Layers className="w-4 h-4 text-hw-muted" />
                       )}

@@ -9,6 +9,7 @@ import {
 import type { Car, CollectionEntry, WishlistEntry } from '../types'
 import { colorToCss } from '../lib/colors'
 import { isMarkedForReview } from '../lib/review'
+import { resolveImageUrl } from '../lib/api'
 
 interface CarCardProps {
   car: Car
@@ -74,7 +75,7 @@ export function CarCard({
       <div className="relative h-40 overflow-hidden bg-zinc-900">
         {car.image_url && !imgError ? (
           <img
-            src={car.image_url}
+            src={resolveImageUrl(car.image_url)}
             alt={car.name}
             className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
             onError={() => setImgError(true)}

@@ -2,6 +2,7 @@ import asyncio
 import io
 import os
 import re
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional, Literal
 from urllib.parse import quote, unquote, urlparse
@@ -11,13 +12,27 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from supabase import Client, create_client
 
 load_dotenv()
 
-app = FastAPI()
-_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",")
+import auth  # noqa: E402  — imported after load_dotenv so config is available
+import db  # noqa: E402
+from auth import get_current_user  # noqa: E402
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Open the connection pool up front so the first request doesn't pay for it,
+    # and so a bad DATABASE_URL fails the container's healthcheck immediately
+    # rather than surfacing as a confusing error on some later page load.
+    db.open_pool()
+    yield
+    db.close_pool()
+
+
+app = FastAPI(lifespan=lifespan)
+_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
@@ -26,22 +41,65 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-supabase: Client = create_client(
-    os.getenv("SUPABASE_URL"), os.getenv("SUPABASE_SERVICE_KEY")
+# Car images live on a mounted volume on the NAS instead of Supabase Storage.
+IMAGE_DIR = os.getenv(
+    "IMAGE_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "car-images")
 )
+os.makedirs(IMAGE_DIR, exist_ok=True)
+app.mount("/images", StaticFiles(directory=IMAGE_DIR), name="images")
+
+
+@app.get("/api/health")
+def health():
+    """Used by the Docker healthcheck and by uptime checks on the NAS."""
+    try:
+        db.query_one("SELECT 1 AS ok")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"database unavailable: {exc}")
+    return {"status": "ok"}
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────────
 
-async def get_current_user(request: Request):
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing token")
-    token = auth_header.split(" ")[1]
-    user = supabase.auth.get_user(token)
-    if not user or not user.user:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return user.user
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: str
+    new_password: str
+
+
+@app.post("/api/auth/login")
+def login(body: LoginRequest):
+    row = auth.authenticate(body.email, body.password)
+    if not row:
+        # Same message either way — don't reveal which addresses have accounts.
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    token = auth.create_token(str(row["id"]), row["email"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {"id": str(row["id"]), "email": row["email"]},
+    }
+
+
+@app.get("/api/auth/me")
+def read_me(user=Depends(get_current_user)):
+    return {"id": user.id, "email": user.email}
+
+
+@app.post("/api/auth/password", status_code=204)
+def change_password(body: PasswordChangeRequest, user=Depends(get_current_user)):
+    if not auth.authenticate(user.email, body.current_password):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    db.execute(
+        "UPDATE users SET password_hash = %s WHERE id = %s",
+        (auth.hash_password(body.new_password), user.id),
+    )
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────
@@ -118,6 +176,57 @@ class BarcodeRequest(BaseModel):
 
 # ─── Cars ─────────────────────────────────────────────────────────────────────
 
+def _car_filters(
+    search: Optional[str],
+    series_id: Optional[str],
+    year: Optional[int],
+    treasure_hunt: Optional[bool],
+    type: Optional[str],
+) -> tuple[str, list]:
+    """Build the shared WHERE clause for the car list and its count query.
+
+    Mirrors the previous PostgREST filter chain exactly, including the trick where
+    a year embedded in the search box ("2019 Camaro") is split into a year equality
+    plus per-word name matches.
+    """
+    clauses: list[str] = []
+    params: list = []
+
+    if search:
+        term = search.strip()
+        year_match = re.search(r"\b(19|20)\d{2}\b", term)
+        if year_match:
+            clauses.append("c.year = %s")
+            params.append(int(year_match.group(0)))
+            name_term = re.sub(r"\b(19|20)\d{2}\b", " ", term)
+            name_term = re.sub(r"[()'‘’\"`]", " ", name_term)
+            name_term = re.sub(r"\s+", " ", name_term).strip()
+            for part in name_term.split():
+                if len(part) > 1:
+                    clauses.append("c.name ILIKE %s")
+                    params.append(f"%{part}%")
+        else:
+            clauses.append(
+                "(c.name ILIKE %s OR c.toy_number ILIKE %s OR c.primary_color ILIKE %s)"
+            )
+            params.extend([f"%{term}%"] * 3)
+
+    if series_id:
+        clauses.append("c.series_id = %s")
+        params.append(series_id)
+    if year:
+        clauses.append("c.year = %s")
+        params.append(year)
+    if treasure_hunt is not None:
+        clauses.append("c.treasure_hunt = %s")
+        params.append(treasure_hunt)
+    if type:
+        clauses.append("c.car_type ILIKE %s")
+        params.append(f"%{type}%")
+
+    return (" AND ".join(clauses) if clauses else "TRUE"), params
+
+
 @app.get("/api/cars")
 def get_cars(
     search: Optional[str] = None,
@@ -129,54 +238,36 @@ def get_cars(
     page_size: int = 20,
     user=Depends(get_current_user),
 ):
-    def _escape_or_value(value: str) -> str:
-        return value.replace("\\", "\\\\").replace(",", "\\,")
+    page = max(1, page)
+    # Several pages (AllCarsPage, SeriesPage, AddCarModal) deliberately ask for
+    # page_size=9999 to pull the whole catalogue in one go, so the ceiling has to
+    # stay above that. It exists only to stop an absurd value allocating the world.
+    page_size = max(1, min(page_size, 10000))
+    where, params = _car_filters(search, series_id, year, treasure_hunt, type)
 
-    def apply_filters(q):
-        if search:
-            term = search.strip()
-            year_match = re.search(r"\b(19|20)\d{2}\b", term)
-            if year_match:
-                q = q.eq("year", int(year_match.group(0)))
-                name_term = re.sub(r"\b(19|20)\d{2}\b", " ", term)
-                name_term = re.sub(r"[()'\u2018\u2019\"`]", " ", name_term)
-                name_term = re.sub(r"\s+", " ", name_term).strip()
-                if name_term:
-                    for part in name_term.split():
-                        if len(part) > 1:
-                            q = q.ilike("name", f"%{part}%")
-            else:
-                clauses = [
-                    f"name.ilike.%{_escape_or_value(term)}%",
-                    f"toy_number.ilike.%{_escape_or_value(term)}%",
-                    f"primary_color.ilike.%{_escape_or_value(term)}%",
-                ]
-                q = q.or_(",".join(clauses))
-        if series_id:
-            q = q.eq("series_id", series_id)
-        if year:
-            q = q.eq("year", year)
-        if treasure_hunt is not None:
-            q = q.eq("treasure_hunt", treasure_hunt)
-        if type:
-            q = q.ilike("car_type", f"%{type}%")
-        return q
+    try:
+        # Count without the join — same optimisation as the previous version.
+        total = db.query_one(
+            f"SELECT count(*) AS n FROM all_cars c WHERE {where}", params
+        )["n"]
 
-    # Separate count query (no join, faster)
-    count_result = apply_filters(
-        supabase.table("all_cars").select("id", count="exact")
-    ).execute()
-    total = count_result.count or 0
-
-    # Data query with join
-    start = page_size * (page - 1)
-    end = start + page_size - 1
-    data_result = apply_filters(
-        supabase.table("all_cars").select("*, series(*)")
-    ).range(start, end).execute()
+        # ORDER BY is required for correct paging: without it Postgres may order
+        # rows differently per page, silently duplicating or skipping cars.
+        # Ascending created_at preserves the previous insertion-order feel.
+        items = db.query(
+            f"""{db.SELECT_CAR_WITH_SERIES}
+                WHERE {where}
+                ORDER BY c.created_at NULLS FIRST, c.id
+                LIMIT %s OFFSET %s""",
+            params + [page_size, page_size * (page - 1)],
+        )
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=400, detail="Invalid series_id")
+        raise
 
     return {
-        "items": data_result.data,
+        "items": items,
         "total": total,
         "total_pages": max(1, -(-total // page_size)),
         "page": page,
@@ -186,23 +277,28 @@ def get_cars(
 
 @app.get("/api/cars/{car_id}")
 def get_car(car_id: str, user=Depends(get_current_user)):
-    result = supabase.table("all_cars").select("*, series(*)").eq("id", car_id).single().execute()
-    if not result.data:
+    try:
+        result = db.query_one(f"{db.SELECT_CAR_WITH_SERIES} WHERE c.id = %s", (car_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
+    if not result:
         raise HTTPException(status_code=404, detail="Car not found")
-    return result.data
+    return result
 
 
 @app.post("/api/cars", status_code=201)
 async def create_car(car: CarCreate, user=Depends(get_current_user)):
-    result = supabase.table("all_cars").insert(car.model_dump(exclude_none=True)).execute()
-    new_car = result.data[0]
+    new_car = db.insert("all_cars", car.model_dump(exclude_none=True))
 
-    # If an external image URL was provided, download and mirror to Supabase Storage
-    if car.image_url and "supabase" not in car.image_url:
+    # Mirror externally-hosted images into local storage so the catalogue keeps
+    # working if the source site disappears or starts blocking hotlinks.
+    if car.image_url and not _is_local_image(car.image_url):
         try:
-            stored_url = await _fetch_and_store_image(new_car["id"], car.image_url)
+            stored_url = await _fetch_and_store_image(str(new_car["id"]), car.image_url)
             if stored_url:
-                supabase.table("all_cars").update({"image_url": stored_url}).eq("id", new_car["id"]).execute()
+                db.update("all_cars", {"image_url": stored_url}, "id = %s", (new_car["id"],))
                 new_car["image_url"] = stored_url
         except Exception:
             pass  # non-critical — keep original URL as fallback
@@ -215,75 +311,87 @@ def update_car(car_id: str, car: CarUpdate, user=Depends(get_current_user)):
     updates = car.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    result = supabase.table("all_cars").update(updates).eq("id", car_id).execute()
-    if not result.data:
+    try:
+        result = db.update("all_cars", updates, "id = %s", (car_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
+    if not result:
         raise HTTPException(status_code=404, detail="Car not found")
-    return result.data[0]
+    return result[0]
 
 
 @app.delete("/api/cars/{car_id}", status_code=204)
 def delete_car(car_id: str, user=Depends(get_current_user)):
-    # Remove from collection and wishlist first (cascade)
-    supabase.table("user_collection").delete().eq("allcars_id", car_id).execute()
-    supabase.table("wishlist").delete().eq("allcars_id", car_id).execute()
-    supabase.table("all_cars").delete().eq("id", car_id).execute()
+    # Collection and wishlist rows go with it via ON DELETE CASCADE, so unlike
+    # the Supabase version this needs no manual cleanup queries first.
+    try:
+        db.delete("all_cars", "id = %s", (car_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
+    _delete_image_files(car_id)
 
 
 # ─── Series ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/series")
 def get_all_series(user=Depends(get_current_user)):
-    series_result = supabase.table("series").select("*").execute()
+    """Series list annotated with how many of each the current user owns.
 
-    collection_result = (
-        supabase.table("user_collection")
-        .select("allcars_id, all_cars(series_id)")
-        .eq("user_id", user.id)
-        .execute()
+    The old version pulled the whole collection and counted in Python; the count
+    is now a grouped join, which is both less code and one round trip.
+    """
+    return db.query(
+        """
+        SELECT s.*, COALESCE(owned.n, 0)::int AS owned_count
+        FROM series s
+        LEFT JOIN (
+            SELECT c.series_id, count(DISTINCT uc.allcars_id) AS n
+            FROM user_collection uc
+            JOIN all_cars c ON c.id = uc.allcars_id
+            WHERE uc.user_id = %s
+            GROUP BY c.series_id
+        ) owned ON owned.series_id = s.id
+        ORDER BY s.created_at NULLS FIRST, s.id
+        """,
+        (user.id,),
     )
-
-    owned_per_series: dict[str, int] = {}
-    for entry in collection_result.data:
-        car = entry.get("all_cars")
-        if car and car.get("series_id"):
-            sid = car["series_id"]
-            owned_per_series[sid] = owned_per_series.get(sid, 0) + 1
-
-    result = []
-    for s in series_result.data:
-        s["owned_count"] = owned_per_series.get(s["id"], 0)
-        result.append(s)
-
-    return result
 
 
 @app.get("/api/series/{series_id}")
 def get_series(series_id: str, user=Depends(get_current_user)):
-    series_result = supabase.table("series").select("*").eq("id", series_id).single().execute()
-    if not series_result.data:
-        raise HTTPException(status_code=404, detail="Series not found")
+    try:
+        series_row = db.query_one("SELECT * FROM series WHERE id = %s", (series_id,))
+        if not series_row:
+            raise HTTPException(status_code=404, detail="Series not found")
 
-    cars_result = supabase.table("all_cars").select("*").eq("series_id", series_id).execute()
+        cars = db.query(
+            """
+            SELECT c.*, (uc.id IS NOT NULL) AS owned
+            FROM all_cars c
+            LEFT JOIN user_collection uc
+                   ON uc.allcars_id = c.id AND uc.user_id = %s
+            WHERE c.series_id = %s
+            ORDER BY c.series_number NULLS LAST, c.name
+            """,
+            (user.id, series_id),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Series not found")
+        raise
 
-    collection_result = (
-        supabase.table("user_collection")
-        .select("allcars_id")
-        .eq("user_id", user.id)
-        .execute()
-    )
-    owned_ids = {e["allcars_id"] for e in collection_result.data}
-
-    cars = cars_result.data
-    for car in cars:
-        car["owned"] = car["id"] in owned_ids
-
-    return {**series_result.data, "cars": cars}
+    return {**series_row, "cars": cars}
 
 
 @app.post("/api/series", status_code=201)
 def create_series(series: SeriesCreate, user=Depends(get_current_user)):
-    result = supabase.table("series").insert(series.model_dump(exclude_none=True)).execute()
-    return result.data[0]
+    return db.insert("series", series.model_dump(exclude_none=True))
 
 
 @app.put("/api/series/{series_id}")
@@ -291,52 +399,56 @@ def update_series(series_id: str, series: SeriesUpdate, user=Depends(get_current
     updates = series.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    result = supabase.table("series").update(updates).eq("id", series_id).execute()
-    if not result.data:
+    try:
+        result = db.update("series", updates, "id = %s", (series_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Series not found")
+        raise
+    if not result:
         raise HTTPException(status_code=404, detail="Series not found")
-    return result.data[0]
+    return result[0]
 
 
 @app.delete("/api/series/{series_id}", status_code=204)
 def delete_series(series_id: str, user=Depends(get_current_user)):
-    # Null out series_id on cars that reference this series
-    supabase.table("all_cars").update({"series_id": None}).eq("series_id", series_id).execute()
-    supabase.table("series").delete().eq("id", series_id).execute()
+    # all_cars.series_id is ON DELETE SET NULL, so cars survive with no series.
+    try:
+        db.delete("series", "id = %s", (series_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Series not found")
+        raise
 
 
 # ─── Collection ───────────────────────────────────────────────────────────────
 
 @app.get("/api/collection")
 def get_collection(user=Depends(get_current_user)):
-    result = (
-        supabase.table("user_collection")
-        .select("*, all_cars(*, series(*))")
-        .eq("user_id", user.id)
-        .execute()
+    # The joined car already comes back under a `car` key, so the old
+    # all_cars -> car rename loop is gone.
+    return db.query(
+        f"{db.SELECT_COLLECTION_WITH_CAR} WHERE uc.user_id = %s"
+        " ORDER BY uc.created_at DESC NULLS LAST, uc.id",
+        (user.id,),
     )
-    # Rename all_cars -> car to match frontend types
-    for entry in result.data:
-        entry["car"] = entry.pop("all_cars", None)
-    return result.data
 
 
 @app.post("/api/collection", status_code=201)
 def add_to_collection(entry: CollectionCreate, user=Depends(get_current_user)):
     payload = entry.model_dump(exclude_none=True)
-    if "date_acquired" in payload:
-        payload["date_acquired"] = str(payload["date_acquired"])
     payload["user_id"] = user.id
-    result = supabase.table("user_collection").insert(payload).execute()
-    # Fetch the inserted row with related car data
-    entry_id = result.data[0]["id"]
-    fetched = (
-        supabase.table("user_collection")
-        .select("*, all_cars(*, series(*))")
-        .eq("id", entry_id)
-        .execute()
+    try:
+        inserted = db.insert("user_collection", payload)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=400, detail="Invalid car id")
+        if db.is_fk_violation(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
+    return db.query_one(
+        f"{db.SELECT_COLLECTION_WITH_CAR} WHERE uc.id = %s", (inserted["id"],)
     )
-    fetched.data[0]["car"] = fetched.data[0].pop("all_cars", None)
-    return fetched.data[0]
 
 
 @app.put("/api/collection/{entry_id}")
@@ -344,48 +456,52 @@ def update_collection_entry(entry_id: str, entry: CollectionUpdate, user=Depends
     updates = entry.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    if "date_acquired" in updates:
-        updates["date_acquired"] = str(updates["date_acquired"])
-    result = (
-        supabase.table("user_collection")
-        .update(updates)
-        .eq("id", entry_id)
-        .eq("user_id", user.id)
-        .execute()
-    )
-    if not result.data:
+    try:
+        result = db.update(
+            "user_collection", updates, "id = %s AND user_id = %s", (entry_id, user.id)
+        )
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Entry not found")
+        raise
+    if not result:
         raise HTTPException(status_code=404, detail="Entry not found")
-    return result.data[0]
+    return result[0]
 
 
 @app.delete("/api/collection/{entry_id}", status_code=204)
 def remove_from_collection(entry_id: str, user=Depends(get_current_user)):
-    supabase.table("user_collection").delete().eq("id", entry_id).eq("user_id", user.id).execute()
+    try:
+        db.delete("user_collection", "id = %s AND user_id = %s", (entry_id, user.id))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Entry not found")
+        raise
 
 
 # ─── Wishlist ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/wishlist")
 def get_wishlist(user=Depends(get_current_user)):
-    result = (
-        supabase.table("wishlist")
-        .select("*, all_cars(*, series(*))")
-        .eq("user_id", user.id)
-        .order("priority")
-        .execute()
+    return db.query(
+        f"{db.SELECT_WISHLIST_WITH_CAR} WHERE w.user_id = %s"
+        " ORDER BY w.priority NULLS LAST, w.id",
+        (user.id,),
     )
-    # Rename all_cars -> car to match frontend types
-    for entry in result.data:
-        entry["car"] = entry.pop("all_cars", None)
-    return result.data
 
 
 @app.post("/api/wishlist", status_code=201)
 def add_to_wishlist(entry: WishlistCreate, user=Depends(get_current_user)):
     payload = entry.model_dump(exclude_none=True)
     payload["user_id"] = user.id
-    result = supabase.table("wishlist").insert(payload).execute()
-    return result.data[0]
+    try:
+        return db.insert("wishlist", payload)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=400, detail="Invalid car id")
+        if db.is_fk_violation(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
 
 
 @app.put("/api/wishlist/{entry_id}")
@@ -393,57 +509,59 @@ def update_wishlist_entry(entry_id: str, entry: WishlistUpdate, user=Depends(get
     updates = entry.model_dump(exclude_none=True)
     if not updates:
         raise HTTPException(status_code=400, detail="No fields to update")
-    result = (
-        supabase.table("wishlist")
-        .update(updates)
-        .eq("id", entry_id)
-        .eq("user_id", user.id)
-        .execute()
-    )
-    if not result.data:
+    try:
+        result = db.update(
+            "wishlist", updates, "id = %s AND user_id = %s", (entry_id, user.id)
+        )
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Entry not found")
+        raise
+    if not result:
         raise HTTPException(status_code=404, detail="Entry not found")
-    return result.data[0]
+    return result[0]
 
 
 @app.delete("/api/wishlist/{entry_id}", status_code=204)
 def remove_from_wishlist(entry_id: str, user=Depends(get_current_user)):
-    supabase.table("wishlist").delete().eq("id", entry_id).eq("user_id", user.id).execute()
+    try:
+        db.delete("wishlist", "id = %s AND user_id = %s", (entry_id, user.id))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Entry not found")
+        raise
 
 
 # ─── Analytics ────────────────────────────────────────────────────────────────
 
 @app.get("/api/analytics")
 def get_analytics(user=Depends(get_current_user)):
-    collection = (
-        supabase.table("user_collection")
-        .select("*, all_cars(*, series(*))")
-        .eq("user_id", user.id)
-        .execute()
-    ).data
+    collection = db.query(
+        f"{db.SELECT_COLLECTION_WITH_CAR} WHERE uc.user_id = %s", (user.id,)
+    )
 
-    # Get all cars per series for completion calculation
-    all_cars_result = supabase.table("all_cars").select("series_id").execute()
-    cars_per_series: dict[str, int] = {}
-    for car in all_cars_result.data:
-        sid = car.get("series_id")
-        if sid:
-            cars_per_series[sid] = cars_per_series.get(sid, 0) + 1
+    # Actual catalogue size per series, used when series.total_count is NULL.
+    cars_per_series: dict[str, int] = {
+        str(row["series_id"]): row["n"]
+        for row in db.query(
+            "SELECT series_id, count(*)::int AS n FROM all_cars"
+            " WHERE series_id IS NOT NULL GROUP BY series_id"
+        )
+    }
 
-    series_all = supabase.table("series").select("*").execute().data
+    series_all = db.query("SELECT * FROM series")
 
     total_cars = sum(e["amount_owned"] for e in collection)
-    treasure_hunts = sum(
-        1 for e in collection if (e.get("all_cars") or {}).get("treasure_hunt")
-    )
+    treasure_hunts = sum(1 for e in collection if (e.get("car") or {}).get("treasure_hunt"))
 
     cars_by_type: dict[str, int] = {}
     for e in collection:
-        car_type = (e.get("all_cars") or {}).get("car_type") or "unknown"
+        car_type = (e.get("car") or {}).get("car_type") or "unknown"
         cars_by_type[car_type] = cars_by_type.get(car_type, 0) + e["amount_owned"]
 
     cars_by_year: dict[str, int] = {}
     for e in collection:
-        year = str((e.get("all_cars") or {}).get("year") or "unknown")
+        year = str((e.get("car") or {}).get("year") or "unknown")
         cars_by_year[year] = cars_by_year.get(year, 0) + e["amount_owned"]
 
     # Condition breakdown
@@ -460,7 +578,7 @@ def get_analytics(user=Depends(get_current_user)):
     # Top colors (top 8)
     color_counts: dict[str, int] = {}
     for e in collection:
-        color = (e.get("all_cars") or {}).get("primary_color")
+        color = (e.get("car") or {}).get("primary_color")
         if color:
             bucket = _color_bucket(color)
             color_counts[bucket] = color_counts.get(bucket, 0) + e.get("amount_owned", 1)
@@ -468,17 +586,18 @@ def get_analytics(user=Depends(get_current_user)):
 
     owned_per_series: dict[str, int] = {}
     for e in collection:
-        sid = (e.get("all_cars") or {}).get("series_id")
+        sid = (e.get("car") or {}).get("series_id")
         if sid:
-            owned_per_series[sid] = owned_per_series.get(sid, 0) + 1
+            owned_per_series[str(sid)] = owned_per_series.get(str(sid), 0) + 1
 
     series_completion = []
     for s in series_all:
-        owned = owned_per_series.get(s["id"], 0)
+        sid = str(s["id"])
+        owned = owned_per_series.get(sid, 0)
         if owned == 0:
             continue
-        # Use actual car count from all_cars table as total if series.total_count is NULL
-        total = s.get("total_count") or cars_per_series.get(s["id"], 0) or 0
+        # Fall back to the real car count when series.total_count is NULL
+        total = s.get("total_count") or cars_per_series.get(sid, 0) or 0
         series_completion.append({
             "series": s,
             "owned": owned,
@@ -487,19 +606,13 @@ def get_analytics(user=Depends(get_current_user)):
         })
     series_completion.sort(key=lambda x: x["percent"], reverse=True)
 
-    # Total cars in catalog (sum of actual car counts per series)
     total_cars_in_catalog = sum(cars_per_series.values())
 
-    recently_added = (
-        supabase.table("user_collection")
-        .select("*, all_cars(*, series(*))")
-        .eq("user_id", user.id)
-        .order("created_at", desc=True)
-        .limit(5)
-        .execute()
-    ).data
-    for entry in recently_added:
-        entry["car"] = entry.pop("all_cars", None)
+    recently_added = db.query(
+        f"{db.SELECT_COLLECTION_WITH_CAR} WHERE uc.user_id = %s"
+        " ORDER BY uc.created_at DESC NULLS LAST, uc.id LIMIT 5",
+        (user.id,),
+    )
 
     return {
         "total_cars": total_cars,
@@ -521,42 +634,82 @@ def get_analytics(user=Depends(get_current_user)):
 
 @app.post("/api/barcode/lookup")
 def barcode_lookup(body: BarcodeRequest, user=Depends(get_current_user)):
-    result = (
-        supabase.table("all_cars")
-        .select("*, series(*)")
-        .eq("barcode", body.barcode)
-        .limit(1)
-        .execute()
+    car = db.query_one(
+        f"{db.SELECT_CAR_WITH_SERIES} WHERE c.barcode = %s LIMIT 1", (body.barcode,)
     )
-    if not result.data:
+    if not car:
         return {"found": False, "car": None}
-    return {"found": True, "car": result.data[0]}
+    return {"found": True, "car": car}
 
 
 # ─── Image Upload ─────────────────────────────────────────────────────────────
 
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 EXT_MAP = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _image_url(car_id: str, ext: str) -> str:
+    """Images are stored as a root-relative path rather than an absolute URL.
+
+    The NAS is reachable under more than one host — a LAN address at home and a
+    tunnel hostname when out at a store — and baking either one into the database
+    would break the other. The frontend joins this onto its configured API base
+    (see resolveImageUrl in frontend/src/lib/api.ts).
+    """
+    return f"/images/{car_id}.{ext}"
+
+
+def _is_local_image(url: str) -> bool:
+    return url.startswith("/images/")
+
+
+def _image_path(car_id: str, ext: str) -> str:
+    return os.path.join(IMAGE_DIR, f"{car_id}.{ext}")
+
+
+def _delete_image_files(car_id: str) -> None:
+    """Remove every stored variant for a car, whatever extension it was saved under."""
+    for ext in EXT_MAP.values():
+        try:
+            os.remove(_image_path(car_id, ext))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+
+def _store_image_bytes(car_id: str, content: bytes, content_type: str) -> str:
+    ext = EXT_MAP.get(content_type, "jpg")
+    # Drop other extensions first so a png->jpg replacement leaves no stale file.
+    for old_ext in EXT_MAP.values():
+        if old_ext != ext:
+            try:
+                os.remove(_image_path(car_id, old_ext))
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+    with open(_image_path(car_id, ext), "wb") as fh:
+        fh.write(content)
+    return _image_url(car_id, ext)
 
 
 async def _fetch_and_store_image(car_id: str, url: str) -> Optional[str]:
-    """Download an external image and store it in Supabase Storage. Returns the public URL."""
+    """Download an external image onto local storage. Returns the relative URL."""
     async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
         resp = await client.get(url, headers=HEADERS)
         if resp.status_code != 200:
             return None
 
+    if len(resp.content) > MAX_IMAGE_BYTES:
+        return None
+
     content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip()
     if content_type not in ALLOWED_IMAGE_TYPES:
         content_type = "image/jpeg"
-    ext = EXT_MAP.get(content_type, "jpg")
-    path = f"{car_id}.{ext}"
 
-    supabase.storage.from_("car-images").upload(
-        path, resp.content,
-        {"content-type": content_type, "upsert": "true"},
-    )
-    return supabase.storage.from_("car-images").get_public_url(path)
+    return _store_image_bytes(car_id, resp.content, content_type)
 
 
 @app.post("/api/cars/{car_id}/image")
@@ -569,46 +722,33 @@ async def upload_car_image(
         raise HTTPException(status_code=400, detail="Only JPEG, PNG, or WebP images are allowed")
 
     content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
+    if len(content) > MAX_IMAGE_BYTES:
         raise HTTPException(status_code=400, detail="Image must be under 5 MB")
 
-    ext = EXT_MAP[file.content_type]
-    path = f"{car_id}.{ext}"
-
-    # Remove any existing image for this car first (different extension)
-    for old_ext in EXT_MAP.values():
-        if old_ext != ext:
-            try:
-                supabase.storage.from_("car-images").remove([f"{car_id}.{old_ext}"])
-            except Exception:
-                pass
-
-    supabase.storage.from_("car-images").upload(
-        path,
-        content,
-        {"content-type": file.content_type, "upsert": "true"},
-    )
-
-    public_url = supabase.storage.from_("car-images").get_public_url(path)
-
-    result = supabase.table("all_cars").update({"image_url": public_url}).eq("id", car_id).execute()
-    if not result.data:
+    # Confirm the car exists before writing a file we would otherwise orphan.
+    try:
+        exists = db.query_one("SELECT id FROM all_cars WHERE id = %s", (car_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
+    if not exists:
         raise HTTPException(status_code=404, detail="Car not found")
 
+    public_url = _store_image_bytes(car_id, content, file.content_type)
+    db.update("all_cars", {"image_url": public_url}, "id = %s", (car_id,))
     return {"image_url": public_url}
 
 
 @app.delete("/api/cars/{car_id}/image", status_code=204)
 async def delete_car_image(car_id: str, user=Depends(get_current_user)):
-    car = supabase.table("all_cars").select("image_url").eq("id", car_id).single().execute()
-    if car.data and car.data.get("image_url"):
-        for ext in EXT_MAP.values():
-            try:
-                supabase.storage.from_("car-images").remove([f"{car_id}.{ext}"])
-            except Exception:
-                pass
-    supabase.table("all_cars").update({"image_url": None}).eq("id", car_id).execute()
-
+    try:
+        db.update("all_cars", {"image_url": None}, "id = %s", (car_id,))
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Car not found")
+        raise
+    _delete_image_files(car_id)
 
 # ─── Scraping ─────────────────────────────────────────────────────────────────
 
@@ -1160,8 +1300,10 @@ async def scrape_feed(
     # Mark cars whose name already exists in the DB
     try:
         names = [c["name"] for c in pool]
-        existing = supabase.table("all_cars").select("name").in_("name", names).execute()
-        existing_names = {row["name"] for row in (existing.data or [])}
+        existing = db.query(
+            "SELECT name FROM all_cars WHERE name = ANY(%s)", (names,)
+        )
+        existing_names = {row["name"] for row in existing}
         for car in pool:
             car["in_db"] = car["name"] in existing_names
     except Exception:

@@ -11,7 +11,7 @@ import {
   Package,
 } from 'lucide-react'
 import { useToastContext } from '../contexts/ToastContext'
-import { getAnalytics } from '../lib/api'
+import { getAnalytics, resolveImageUrl } from '../lib/api'
 import { colorToCss } from '../lib/colors'
 import type { Analytics } from '../types'
 
@@ -440,7 +440,7 @@ export function AnalyticsPage() {
                 >
                   <div className="w-10 h-10 rounded-lg bg-hw-surface-hover border border-hw-border flex-shrink-0 overflow-hidden">
                     {car.image_url ? (
-                      <img src={car.image_url} alt={car.name} className="w-full h-full object-cover" />
+                      <img src={resolveImageUrl(car.image_url)} alt={car.name} className="w-full h-full object-cover" />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">
                         <Car className="w-4 h-4 text-hw-muted" />

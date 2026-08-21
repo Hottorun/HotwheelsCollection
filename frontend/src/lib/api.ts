@@ -1,4 +1,4 @@
-import { supabase } from './supabase'
+import { getToken, handleExpired, setToken, clearToken } from './session'
 import type {
   Car,
   Series,
@@ -9,15 +9,27 @@ import type {
   PaginatedResponse,
 } from '../types'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+export const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  const { data: { session } } = await supabase.auth.getSession()
+/**
+ * Car images are stored on the NAS and come back as a root-relative path
+ * ("/images/<id>.jpg") rather than an absolute URL, because the NAS answers on
+ * more than one hostname — the LAN address at home, the tunnel hostname when
+ * out. Anything already absolute (scraped wiki/CollectHW images) passes through.
+ */
+export function resolveImageUrl(url?: string | null): string | undefined {
+  if (!url) return undefined
+  if (url.startsWith('/images/')) return `${API_BASE}${url}`
+  return url
+}
+
+function getAuthHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
-  if (session?.access_token) {
-    headers['Authorization'] = `Bearer ${session.access_token}`
+  const token = getToken()
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
   }
   return headers
 }
@@ -26,22 +38,54 @@ async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const headers = await getAuthHeaders()
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
-      ...headers,
+      ...getAuthHeaders(),
       ...(options.headers as Record<string, string>),
     },
   })
 
   if (!response.ok) {
+    // An expired or revoked token should send us back to the login screen
+    // rather than surfacing as a generic error on every page.
+    if (response.status === 401) handleExpired()
     const error = await response.json().catch(() => ({ detail: 'Request failed' }))
     throw new Error(error.detail || `HTTP ${response.status}`)
   }
 
   if (response.status === 204) return undefined as T
   return response.json()
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  id: string
+  email: string
+}
+
+export async function login(email: string, password: string): Promise<AuthUser> {
+  const response = await fetch(`${API_BASE}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  })
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({ detail: 'Login failed' }))
+    throw new Error(err.detail || 'Invalid email or password')
+  }
+  const data = await response.json()
+  setToken(data.access_token)
+  return data.user as AuthUser
+}
+
+export async function fetchMe(): Promise<AuthUser> {
+  return request<AuthUser>('/api/auth/me')
+}
+
+export function logout(): void {
+  clearToken()
 }
 
 // ─── Cars ────────────────────────────────────────────────────────────────────
@@ -196,15 +240,18 @@ export async function lookupBarcode(barcode: string): Promise<BarcodeResult> {
 // ─── Image Upload ─────────────────────────────────────────────────────────────
 
 export async function uploadCarImage(carId: string, file: File): Promise<{ image_url: string }> {
-  const { data: { session } } = await (await import('./supabase')).supabase.auth.getSession()
   const formData = new FormData()
   formData.append('file', file)
+  const token = getToken()
+  // Content-Type is deliberately left unset so the browser adds the multipart
+  // boundary itself.
   const response = await fetch(`${API_BASE}/api/cars/${carId}/image`, {
     method: 'POST',
-    headers: session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {},
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
     body: formData,
   })
   if (!response.ok) {
+    if (response.status === 401) handleExpired()
     const err = await response.json().catch(() => ({ detail: 'Upload failed' }))
     throw new Error(err.detail || `HTTP ${response.status}`)
   }

@@ -5,12 +5,11 @@ import React, {
   useState,
   useCallback,
 } from 'react'
-import type { Session, User } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabase'
+import { fetchMe, login as apiLogin, logout as apiLogout, type AuthUser } from '../lib/api'
+import { getToken, setExpiredHandler } from '../lib/session'
 
 interface AuthContextValue {
-  user: User | null
-  session: Session | null
+  user: AuthUser | null
   loading: boolean
   signIn: (email: string, password: string) => Promise<{ error: Error | null }>
   signOut: () => Promise<void>
@@ -19,39 +18,59 @@ interface AuthContextValue {
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null)
-  const [session, setSession] = useState<Session | null>(null)
+  const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setUser(session?.user ?? null)
+    let cancelled = false
+
+    // A token in storage is only a hint — it may be expired or its account
+    // deleted, so confirm it against the backend before treating it as a session.
+    if (!getToken()) {
       setLoading(false)
-    })
+      return
+    }
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      (_event, session) => {
-        setSession(session)
-        setUser(session?.user ?? null)
-        setLoading(false)
-      }
-    )
+    fetchMe()
+      .then((me) => {
+        if (!cancelled) setUser(me)
+      })
+      .catch(() => {
+        if (!cancelled) setUser(null)
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
 
-    return () => subscription.unsubscribe()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // Any 401 anywhere in the app clears the session here too, so protected
+  // routes redirect instead of rendering against a dead token.
+  useEffect(() => {
+    setExpiredHandler(() => setUser(null))
+    return () => setExpiredHandler(null)
   }, [])
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    return { error: error as Error | null }
+    try {
+      const me = await apiLogin(email, password)
+      setUser(me)
+      return { error: null }
+    } catch (err) {
+      return { error: err as Error }
+    }
   }, [])
 
   const signOut = useCallback(async () => {
-    await supabase.auth.signOut()
+    apiLogout()
+    setUser(null)
   }, [])
 
   return (
-    <AuthContext.Provider value={{ user, session, loading, signIn, signOut }}>
+    <AuthContext.Provider value={{ user, loading, signIn, signOut }}>
       {children}
     </AuthContext.Provider>
   )

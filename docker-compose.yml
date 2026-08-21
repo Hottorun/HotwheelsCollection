@@ -6,13 +6,16 @@
 # Open the frontend service in a browser (FRONTEND_PORT, default 18080). The
 # backend port serves the API only and has no page at /.
 #
-# Deploy this with `docker compose` from the command line. Importing it into a
-# NAS Docker UI tends to generate a second compose file alongside this one and
-# manage the containers under its own project name, after which the CLI and the
-# UI disagree about what is running.
+# Deploy from the NAS Docker UI or the command line — either is fine, as long as
+# both point at *this* file and agree on the project name. The explicit `name:`
+# below is what makes that work: without it the project name gets derived from
+# whichever directory or UI form the stack was created from, and the two end up
+# managing separate copies of the same stack.
 #
 # Data lives in two named volumes, pgdata and car-images. Those are the only
 # things that matter for backups — see migration/backup.sh.
+
+name: hotwheels
 
 services:
   db:

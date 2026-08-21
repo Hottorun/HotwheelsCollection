@@ -70,19 +70,38 @@ comes into it.
 
 ### 3. Start it
 
-Use the command line, **not** the NAS's Docker UI:
+Either the UGREEN Docker UI or the command line works. Two rules keep them in
+agreement, and breaking either is what causes the "CLI says nothing is running
+while containers are obviously serving traffic" confusion:
+
+**One compose file.** The repo ships `docker-compose.yml`. If the Docker UI has
+generated its own `docker-compose.yaml` next to it, delete that one — otherwise
+the UI and the CLI each edit a different file and your changes land in whichever
+one you didn't deploy.
+
+```bash
+ls -la /volume2/docker/HotwheelsCollection/docker-compose.*
+```
+
+**One project name.** `docker-compose.yml` sets `name: hotwheels` at the top, so
+the stack is called `hotwheels` no matter how it was started. Without that, the
+CLI names the project after the directory while the UI picks its own, and you
+end up with two independent copies of the same stack.
+
+Via the UI: point the project at the existing directory and its
+`docker-compose.yml` rather than pasting the YAML into the form — pasting makes
+the UI write a new file, which is how the duplicate appears.
+
+From the shell:
 
 ```bash
 cd /volume2/docker/HotwheelsCollection
 docker compose up -d --build
 ```
 
-> **Why not the UI?** Importing this stack into the UGREEN Docker UI writes its
-> own `docker-compose.yaml` next to the `docker-compose.yml` in the repo, and
-> runs the containers under a project name of its own choosing. After that the
-> CLI and the UI each see a different stack: `docker compose ps` reports nothing
-> running while containers are plainly serving traffic. If that has already
-> happened, see "CLI and UI disagree" in Troubleshooting.
+Containers started either way show up in the Docker app's container list and in
+`docker compose ps`, because both are talking to the same Docker daemon about
+the same project.
 
 `migration/schema.sql` runs automatically the first time, creating the tables.
 
@@ -165,18 +184,21 @@ claimed — UGOS itself uses 8000, and other apps take more (`upsnap` sits on
 `FRONTEND_PORT` / `BACKEND_PORT` in `.env` and `docker compose up -d` again.
 
 **CLI and UI disagree — `docker compose ps` is empty but containers are
-running.** The Docker UI deployed the stack under its own project name, and
-probably from its own generated `docker-compose.yaml` rather than the repo's
-`docker-compose.yml`. Untangle it:
+running.** They're managing two different projects. See what actually exists:
 
 ```bash
 docker compose ls -a                    # every project, and the file each uses
 docker ps --format '{{.Names}}\t{{.Ports}}\t{{.Status}}'
 ```
 
-Stop the UI-managed stack from the UI, delete the stray `docker-compose.yaml`
-(the repo's file is `.yml`), then bring it up from the command line. Removing
-the containers is safe — the data lives in the named volumes, not in them.
+If you see a project that isn't `hotwheels`, that's the stray one. Stop and
+remove it (from the UI if the UI created it), delete any `docker-compose.yaml`
+sitting beside the repo's `docker-compose.yml`, then start the stack again. With
+`name: hotwheels` in the file, both the UI and the CLI land on the same project
+from then on.
+
+Removing containers is safe — the data lives in the named volumes, which
+survive. Just don't pass `-v` to `docker compose down`, which would delete them.
 
 **`Connection reset by peer` on a published port.** `ss` shows `docker-proxy`
 holding the port, so it's bound, but the connection dies. Usually this is either

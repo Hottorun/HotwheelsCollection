@@ -17,10 +17,13 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;    -- fast ILIKE '%term%' on name/colour
 --   pbkdf2_sha256$<iterations>$<salt_b64>$<hash_b64>
 -- Supabase's bcrypt hashes are not carried over; passwords are set at import.
 
+-- is_admin gates the user-management screen. Existing databases get this column
+-- from backend/migrations.py instead, since this file only runs on a fresh one.
 CREATE TABLE IF NOT EXISTS users (
     id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     email         text NOT NULL,
     password_hash text NOT NULL,
+    is_admin      boolean NOT NULL DEFAULT false,
     created_at    timestamptz DEFAULT now()
 );
 

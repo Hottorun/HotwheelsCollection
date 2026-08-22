@@ -159,6 +159,12 @@ def is_invalid_uuid(exc: Exception) -> bool:
     return isinstance(exc, psycopg.errors.InvalidTextRepresentation)
 
 
+def is_unique_violation(exc: Exception) -> bool:
+    """Raised when an insert collides with a unique index — e.g. two admins
+    creating the same email at once."""
+    return isinstance(exc, psycopg.errors.UniqueViolation)
+
+
 def is_fk_violation(exc: Exception) -> bool:
     """Raised when e.g. a collection entry references a car id that doesn't exist.
     The old schema had no enforced cascade, so this is newly possible."""

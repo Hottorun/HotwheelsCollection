@@ -33,3 +33,6 @@ migration/export/
 .vscode/
 *.swp
 *.swo
+
+# Database dumps written by the db-dump container
+backups/

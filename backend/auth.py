@@ -55,11 +55,12 @@ class AuthUser:
     """Stands in for the Supabase user object. Route handlers only ever read
     `.id`, so this keeps every `user.id` call site working untouched."""
 
-    __slots__ = ("id", "email")
+    __slots__ = ("id", "email", "is_admin")
 
-    def __init__(self, id: str, email: str):
+    def __init__(self, id: str, email: str, is_admin: bool = False):
         self.id = id
         self.email = email
+        self.is_admin = is_admin
 
 
 async def get_current_user(request: Request) -> AuthUser:
@@ -71,18 +72,31 @@ async def get_current_user(request: Request) -> AuthUser:
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid token")
-    # Confirm the account still exists — a deleted user must not keep a live token.
-    row = db.query_one("SELECT id, email FROM users WHERE id = %s", (user_id,))
+    # Confirm the account still exists — a deleted user must not keep a live
+    # token. is_admin is read fresh here rather than trusted from the token, so
+    # revoking admin takes effect immediately instead of at next login.
+    row = db.query_one(
+        "SELECT id, email, is_admin FROM users WHERE id = %s", (user_id,)
+    )
     if not row:
         raise HTTPException(status_code=401, detail="Invalid token")
-    return AuthUser(str(row["id"]), row["email"])
+    return AuthUser(str(row["id"]), row["email"], row["is_admin"])
 
 
 def authenticate(email: str, password: str) -> Optional[dict]:
     row = db.query_one(
-        "SELECT id, email, password_hash FROM users WHERE lower(email) = lower(%s)",
+        "SELECT id, email, password_hash, is_admin FROM users"
+        " WHERE lower(email) = lower(%s)",
         (email.strip(),),
     )
     if not row or not verify_password(password, row["password_hash"]):
         return None
     return row
+
+
+async def require_admin(request: Request) -> AuthUser:
+    """Dependency for the user-management routes."""
+    user = await get_current_user(request)
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user

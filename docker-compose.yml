@@ -50,6 +50,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-hotwheels}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-hotwheels}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
       TOKEN_TTL_DAYS: ${TOKEN_TTL_DAYS:-30}
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-}
       IMAGE_DIR: /data/car-images
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:5173}
     volumes:
@@ -80,6 +81,29 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+
+  # Writes a consistent pg_dump on a schedule for Backrest to pick up.
+  # Backrest must not snapshot pgdata directly: those files are mid-write while
+  # Postgres runs, and such a copy can restore to a corrupt database.
+  db-dump:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${POSTGRES_USER:-hotwheels}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB:-hotwheels}
+      DUMP_INTERVAL_SECONDS: ${DUMP_INTERVAL_SECONDS:-86400}
+      DUMP_KEEP: ${DUMP_KEEP:-8}
+    volumes:
+      - ./migration/dump-loop.sh:/dump-loop.sh:ro
+      # A bind mount, not a named volume, so Backrest can see the dumps as
+      # ordinary files on the NAS filesystem.
+      - ./backups:/dumps
+    entrypoint: ["/bin/sh", "/dump-loop.sh"]
 
 volumes:
   pgdata:

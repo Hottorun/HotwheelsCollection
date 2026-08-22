@@ -19,6 +19,7 @@ load_dotenv()
 
 import auth  # noqa: E402  — imported after load_dotenv so config is available
 import db  # noqa: E402
+import migrations  # noqa: E402
 from auth import get_current_user  # noqa: E402
 
 @asynccontextmanager
@@ -27,6 +28,9 @@ async def lifespan(_app: FastAPI):
     # and so a bad DATABASE_URL fails the container's healthcheck immediately
     # rather than surfacing as a confusing error on some later page load.
     db.open_pool()
+    # Idempotent schema top-ups for databases that already exist — schema.sql
+    # only runs when Postgres initialises an empty data directory.
+    migrations.run()
     yield
     db.close_pool()
 
@@ -71,6 +75,17 @@ class PasswordChangeRequest(BaseModel):
     new_password: str
 
 
+MIN_PASSWORD_LENGTH = 8
+
+
+def _validate_password(password: str) -> None:
+    if len(password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Password must be at least {MIN_PASSWORD_LENGTH} characters",
+        )
+
+
 @app.post("/api/auth/login")
 def login(body: LoginRequest):
     row = auth.authenticate(body.email, body.password)
@@ -81,25 +96,129 @@ def login(body: LoginRequest):
     return {
         "access_token": token,
         "token_type": "bearer",
-        "user": {"id": str(row["id"]), "email": row["email"]},
+        "user": {
+            "id": str(row["id"]),
+            "email": row["email"],
+            "is_admin": row["is_admin"],
+        },
     }
 
 
 @app.get("/api/auth/me")
 def read_me(user=Depends(get_current_user)):
-    return {"id": user.id, "email": user.email}
+    return {"id": user.id, "email": user.email, "is_admin": user.is_admin}
 
 
 @app.post("/api/auth/password", status_code=204)
 def change_password(body: PasswordChangeRequest, user=Depends(get_current_user)):
     if not auth.authenticate(user.email, body.current_password):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
-    if len(body.new_password) < 8:
-        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    _validate_password(body.new_password)
     db.execute(
         "UPDATE users SET password_hash = %s WHERE id = %s",
         (auth.hash_password(body.new_password), user.id),
     )
+
+
+# ─── Admin: user management ──────────────────────────────────────────────────
+# Everything here requires an admin account. The point is to avoid hand-written
+# SQL for routine account work.
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    is_admin: bool = False
+
+
+class AdminPasswordReset(BaseModel):
+    new_password: str
+
+
+class AdminUserUpdate(BaseModel):
+    is_admin: bool
+
+
+@app.get("/api/admin/users")
+def list_users(admin=Depends(auth.require_admin)):
+    return db.query(
+        """
+        SELECT u.id, u.email, u.is_admin, u.created_at,
+               (SELECT count(*) FROM user_collection uc WHERE uc.user_id = u.id)::int
+                   AS collection_count,
+               (SELECT count(*) FROM wishlist w WHERE w.user_id = u.id)::int
+                   AS wishlist_count
+        FROM users u
+        ORDER BY u.created_at NULLS FIRST, u.email
+        """
+    )
+
+
+@app.post("/api/admin/users", status_code=201)
+def create_user(body: UserCreate, admin=Depends(auth.require_admin)):
+    email = body.email.strip()
+    if "@" not in email or len(email) < 3:
+        raise HTTPException(status_code=400, detail="Enter a valid email address")
+    _validate_password(body.password)
+
+    # Checked up front for a clear message; the unique index below is what
+    # actually guarantees it under concurrent requests.
+    if db.query_one("SELECT 1 FROM users WHERE lower(email) = lower(%s)", (email,)):
+        raise HTTPException(status_code=409, detail="That email already has an account")
+
+    try:
+        row = db.query_one(
+            "INSERT INTO users (email, password_hash, is_admin) VALUES (%s, %s, %s)"
+            " RETURNING id, email, is_admin, created_at",
+            (email, auth.hash_password(body.password), body.is_admin),
+        )
+    except Exception as exc:
+        if db.is_unique_violation(exc):
+            raise HTTPException(status_code=409, detail="That email already has an account")
+        raise
+    return {**row, "collection_count": 0, "wishlist_count": 0}
+
+
+@app.post("/api/admin/users/{user_id}/password", status_code=204)
+def admin_set_password(
+    user_id: str, body: AdminPasswordReset, admin=Depends(auth.require_admin)
+):
+    _validate_password(body.new_password)
+    try:
+        updated = db.execute(
+            "UPDATE users SET password_hash = %s WHERE id = %s",
+            (auth.hash_password(body.new_password), user_id),
+        )
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="User not found")
+        raise
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+
+
+@app.patch("/api/admin/users/{user_id}")
+def admin_update_user(
+    user_id: str, body: AdminUserUpdate, admin=Depends(auth.require_admin)
+):
+    # Refuse to remove your own admin rights: doing so would leave the admin
+    # page unreachable, and getting back in would mean hand-written SQL.
+    if user_id == admin.id and not body.is_admin:
+        raise HTTPException(
+            status_code=400, detail="You can't remove your own admin access"
+        )
+    try:
+        row = db.query_one(
+            "UPDATE users SET is_admin = %s WHERE id = %s"
+            " RETURNING id, email, is_admin, created_at",
+            (body.is_admin, user_id),
+        )
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="User not found")
+        raise
+    if not row:
+        raise HTTPException(status_code=404, detail="User not found")
+    return row
 
 
 # ─── Pydantic Models ──────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import {
   Moon,
   Compass,
   Layers,
+  Shield,
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -110,6 +111,16 @@ export function Layout() {
             </div>
             <span className="text-xs text-hw-text-secondary truncate flex-1">{userEmail}</span>
           </div>
+          {user?.is_admin && (
+            <NavLink
+              to="/admin"
+              onClick={handleNavClick}
+              className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`}
+            >
+              <Shield className="w-4 h-4 flex-shrink-0" />
+              Users
+            </NavLink>
+          )}
           <div className="flex items-center gap-1 px-1">
             <ThemeToggle />
             <button
@@ -179,6 +190,16 @@ export function Layout() {
                   </div>
                   <span className="text-xs text-hw-text-secondary truncate">{userEmail}</span>
                 </div>
+                {user?.is_admin && (
+                  <NavLink
+                    to="/admin"
+                    onClick={handleNavClick}
+                    className={({ isActive }) => `nav-link ${isActive ? 'nav-link-active' : ''}`}
+                  >
+                    <Shield className="w-4 h-4 flex-shrink-0" />
+                    Users
+                  </NavLink>
+                )}
                 <div className="flex items-center gap-1 px-1">
                   <ThemeToggle />
                   <button onClick={handleSignOut} className="nav-link flex-1 hover:text-red-400">

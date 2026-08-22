@@ -23,7 +23,7 @@ Already done, sitting in `migration/export/` (gitignored, 130 MB):
 | user_collection | 340 |
 | wishlist | 0 |
 | auth users | 2 |
-| images | 412 files, 129 MB |
+| images | 411 files, 129 MB |
 
 Verified before the cutover: every collection row points at a car that exists,
 every car's `series_id` resolves, and all 392 referenced images are present.
@@ -149,7 +149,7 @@ and won't touch the password of an account that already exists.
 
 ```bash
 docker compose cp migration/export/car-images/. backend:/data/car-images/
-docker compose exec backend sh -c 'ls /data/car-images | wc -l'   # expect 412
+docker compose exec backend sh -c 'ls /data/car-images | wc -l'   # expect 411
 ```
 
 ### 6. Open it
@@ -231,7 +231,7 @@ docker compose exec db psql -U hotwheels -d hotwheels -c 'SELECT email FROM user
 **Images 404 but data loads.** Step 5 didn't land. Verify:
 
 ```bash
-docker compose exec backend sh -c 'ls /data/car-images | wc -l'   # expect 412
+docker compose exec backend sh -c 'ls /data/car-images | wc -l'   # expect 411
 ```
 
 **Changed the frontend code and nothing changed.** The app is baked into the
@@ -267,31 +267,139 @@ port 8000 directly to the internet.
 This is the part self-hosting hands to you. Supabase isn't keeping a copy
 anymore.
 
+There are two pieces of data, and they need different treatment:
+
+| | Where | How to back it up |
+| --- | --- | --- |
+| Database | `pgdata` volume | **Never copy these files directly.** Use a dump. |
+| Car images | `car-images` volume | Ordinary files, safe to copy as-is |
+
+The database caveat is the important one. Postgres's data directory is
+constantly mid-write, so a file-level snapshot of it can restore to a corrupt
+database. A `pg_dump` is transactionally consistent, which is what you want.
+
+### With Backrest
+
+The `db-dump` container handles the dumping. It runs `pg_dump` on a schedule
+(daily by default, `DUMP_INTERVAL_SECONDS` in `.env`) into `./backups/`, keeping
+the newest `DUMP_KEEP`. It writes to a `.partial` file and renames on completion,
+so Backrest can never catch a half-written dump.
+
+That leaves Backrest with two plain directories to snapshot.
+
+**1. Give Backrest access to both.** The dumps are a bind mount so they're
+already visible on the NAS filesystem. The images live in a named volume, so
+mount it into the Backrest container — read-only, since Backrest never needs to
+write there:
+
+```yaml
+# in Backrest's own docker-compose.yml
+services:
+  backrest:
+    image: garethgeorge/backrest:latest
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+      - ./config:/config
+      - ./cache:/cache
+      # What we actually want backed up:
+      - /volume2/docker/HotwheelsCollection/backups:/userdata/hotwheels-db:ro
+      - hotwheels_car-images:/userdata/hotwheels-images:ro
+    environment:
+      BACKREST_DATA: /data
+      BACKREST_CONFIG: /config/config.json
+    ports:
+      - "9898:9898"
+
+volumes:
+  # Created by the hotwheels stack; `external` means don't make a new one.
+  hotwheels_car-images:
+    external: true
+```
+
+The volume name is the compose project name plus the volume name. Since
+`docker-compose.yml` sets `name: hotwheels`, it's `hotwheels_car-images`.
+Confirm with:
+
 ```bash
-./migration/backup.sh /volume1/backups
+docker volume ls | grep car-images
 ```
 
-Dumps the database, archives the images, verifies the dump is readable, and keeps
-the newest 8 of each. Add it to the NAS task scheduler — weekly is plenty:
+**2. In the Backrest UI**, add a repo (external drive, another NAS, or a cloud
+provider — restic supports B2, S3, and SFTP), then create a plan with both paths:
 
 ```
-cd /volume1/docker/hotwheels && ./migration/backup.sh /volume1/backups
+/userdata/hotwheels-db
+/userdata/hotwheels-images
 ```
+
+A daily schedule with a retention policy of something like 7 daily / 4 weekly /
+6 monthly is sensible here. The images barely change and restic deduplicates, so
+the repo stays small.
+
+> Keep at least one copy off the NAS. A backup sitting on the same machine as the
+> data protects against your mistakes but not against the machine dying.
 
 ### Restoring
 
+Restore the files from Backrest first, then load them back:
+
 ```bash
-# Database
+# Database — from a restored dump file
+docker compose exec -T db psql -U hotwheels -d postgres \
+    -c 'DROP DATABASE hotwheels;' -c 'CREATE DATABASE hotwheels;'
+docker compose exec -T db pg_restore -U hotwheels -d hotwheels < hotwheels-TIMESTAMP.dump
+
+# Images — straight back into the volume
+docker compose cp ./restored-images/. backend:/data/car-images/
+```
+
+### Manual one-off
+
+`migration/backup.sh` still exists for an on-demand backup — it dumps, archives
+the images, verifies the dump is readable, and prunes. Useful before an upgrade:
+
+```bash
+./migration/backup.sh /volume2/backups
+```
+
+Restoring from one of its archives:
+
+```bash
 docker compose exec -T db psql -U hotwheels -d postgres \
     -c 'DROP DATABASE hotwheels;' -c 'CREATE DATABASE hotwheels;'
 docker compose exec -T db pg_restore -U hotwheels -d hotwheels < backups/hotwheels-TIMESTAMP.dump
 
-# Images
 gunzip -c backups/car-images-TIMESTAMP.tar.gz | docker compose exec -T backend tar -xf - -C /data
 ```
 
 Worth actually testing a restore once, while you still have the Supabase project
 as a fallback.
+
+---
+
+## Managing users
+
+`hottorun@pm.me` is an admin (set by `ADMIN_EMAIL` in `.env`). Admins get a
+**Users** entry in the sidebar, above Sign Out, leading to `/admin` where you can:
+
+- create accounts, setting the initial password yourself
+- reset anyone's password without knowing their old one
+- grant or revoke admin access
+
+The new-password fields show the password in plain text rather than masking it —
+there's no email delivery configured, so you have to read it out to hand it over.
+
+Two deliberate limitations:
+
+- **You can't remove your own admin access.** That would make `/admin`
+  unreachable and need SQL to undo.
+- **There's no delete button.** Deleting a user cascades to their entire
+  collection and wishlist. It's a genuinely destructive action, so it stays a
+  deliberate database operation rather than a stray click.
+
+`ADMIN_EMAIL` is re-applied on every backend start. If it's blank or misspelled,
+the oldest account is promoted instead, so there is always a way back in.
 
 ---
 

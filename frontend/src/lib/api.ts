@@ -67,6 +67,7 @@ async function request<T>(
 export interface AuthUser {
   id: string
   email: string
+  is_admin: boolean
 }
 
 export async function login(email: string, password: string): Promise<AuthUser> {
@@ -90,6 +91,59 @@ export async function fetchMe(): Promise<AuthUser> {
 
 export function logout(): void {
   clearToken()
+}
+
+export async function changeOwnPassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  return request<void>('/api/auth/password', {
+    method: 'POST',
+    body: JSON.stringify({
+      current_password: currentPassword,
+      new_password: newPassword,
+    }),
+  })
+}
+
+// ─── Admin ────────────────────────────────────────────────────────────────────
+
+export interface ManagedUser {
+  id: string
+  email: string
+  is_admin: boolean
+  created_at: string
+  collection_count: number
+  wishlist_count: number
+}
+
+export async function getUsers(): Promise<ManagedUser[]> {
+  return request<ManagedUser[]>('/api/admin/users')
+}
+
+export async function createUser(
+  email: string,
+  password: string,
+  isAdmin: boolean
+): Promise<ManagedUser> {
+  return request<ManagedUser>('/api/admin/users', {
+    method: 'POST',
+    body: JSON.stringify({ email, password, is_admin: isAdmin }),
+  })
+}
+
+export async function setUserPassword(userId: string, newPassword: string): Promise<void> {
+  return request<void>(`/api/admin/users/${userId}/password`, {
+    method: 'POST',
+    body: JSON.stringify({ new_password: newPassword }),
+  })
+}
+
+export async function setUserAdmin(userId: string, isAdmin: boolean): Promise<ManagedUser> {
+  return request<ManagedUser>(`/api/admin/users/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ is_admin: isAdmin }),
+  })
 }
 
 // ─── Cars ────────────────────────────────────────────────────────────────────

@@ -13,6 +13,7 @@ import { AnalyticsPage } from './pages/AnalyticsPage'
 import { DiscoverPage } from './pages/DiscoverPage'
 import { BulkAddPage } from './pages/BulkAddPage'
 import { SeriesPage } from './pages/SeriesPage'
+import { AdminPage } from './pages/AdminPage'
 import { Spinner } from './components/Spinner'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -28,6 +29,21 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
   if (!user) {
     return <Navigate to="/login" replace />
+  }
+
+  return <>{children}</>
+}
+
+/**
+ * Belt and braces alongside the hidden nav link — the backend rejects non-admins
+ * on every /api/admin route regardless, but this keeps a typed-in /admin URL
+ * from rendering a page of failed requests.
+ */
+function AdminRoute({ children }: { children: React.ReactNode }) {
+  const { user } = useAuth()
+
+  if (!user?.is_admin) {
+    return <Navigate to="/collection" replace />
   }
 
   return <>{children}</>
@@ -54,6 +70,14 @@ function AppRoutes() {
         <Route path="/series" element={<SeriesPage />} />
         <Route path="/discover" element={<DiscoverPage />} />
         <Route path="/bulk-add" element={<BulkAddPage />} />
+        <Route
+          path="/admin"
+          element={
+            <AdminRoute>
+              <AdminPage />
+            </AdminRoute>
+          }
+        />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

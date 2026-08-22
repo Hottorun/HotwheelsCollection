@@ -25,19 +25,19 @@ while true; do
     # atomic, so Backrest can never pick up a half-written dump mid-snapshot.
     if pg_dump -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -Fc > "$target.partial" 2>/tmp/dump.err; then
         mv "$target.partial" "$target"
-        echo "$(date -Iseconds) wrote $(basename "$target") ($(du -h "$target" | cut -f1))"
+        echo "$(date "+%Y-%m-%dT%H:%M:%S") wrote $(basename "$target") ($(du -h "$target" | cut -f1))"
 
         # Prune old dumps, newest KEEP retained.
         ls -1t "$DUMP_DIR"/hotwheels-*.dump 2>/dev/null \
             | tail -n +$((KEEP + 1)) \
             | while read -r old; do
-                  echo "$(date -Iseconds) pruning $(basename "$old")"
+                  echo "$(date "+%Y-%m-%dT%H:%M:%S") pruning $(basename "$old")"
                   rm -f "$old"
               done
     else
         # Don't leave a partial behind to confuse the next run.
         rm -f "$target.partial"
-        echo "$(date -Iseconds) DUMP FAILED: $(cat /tmp/dump.err)" >&2
+        echo "$(date "+%Y-%m-%dT%H:%M:%S") DUMP FAILED: $(cat /tmp/dump.err)" >&2
     fi
 
     sleep "$INTERVAL"

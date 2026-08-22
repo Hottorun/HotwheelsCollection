@@ -245,20 +245,29 @@ docker compose up -d --build frontend
 
 ## Remote access
 
-The API needs to be reachable from your phone when you're at a store. Two good
-options, both free:
+**Status: not set up yet — deliberately deferred.** The app is LAN-only at
+`http://NAS_IP:18080`. Revisit once the data import is done and the app is
+confirmed working.
 
-**Cloudflare Tunnel** — a public HTTPS hostname, no ports opened on your router.
-Best if you want the site to just work on any device without setup. Run
-`cloudflared` on the NAS pointed at `http://backend:8000`, then set
-`ALLOWED_ORIGINS` and `VITE_API_URL` to the resulting hostname.
+`hotwheels.hottorun.com` is registered at **Porkbun** and currently still serves
+the old Supabase-era frontend. Nothing about it has been changed.
 
-**Tailscale** — puts your phone and NAS on the same private network. Nothing is
-exposed to the internet at all, which is the safer default, but every device that
-uses the app has to be on your tailnet.
+When you come back to it, two good options, both free:
 
-Whichever you pick, the app is now behind a login you control, so don't expose
-port 8000 directly to the internet.
+**Cloudflare Tunnel** — a public HTTPS hostname with no ports opened on the
+router. Point the tunnel at the **frontend** container (`http://frontend:80`),
+not the backend: the frontend already proxies `/api` and `/images`, so the whole
+app stays on one origin and CORS never enters into it. Porkbun domains work with
+this, but the domain's nameservers have to move to Cloudflare first — Porkbun
+supports that, it's just a step to plan for.
+
+**Tailscale** — puts your phone and the NAS on one private network, with nothing
+exposed to the internet. Safer by default, but every device that uses the app
+has to be on the tailnet. No DNS changes needed, so the Porkbun domain is
+irrelevant in this option.
+
+Either way, don't publish the backend port straight to the internet. The login
+protects the data, but there's no rate limiting in front of it.
 
 ---
 

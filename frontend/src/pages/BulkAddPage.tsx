@@ -667,7 +667,12 @@ export function BulkAddPage() {
           </button>
           <div>
             <h1 className="text-2xl font-bold text-hw-text">Bulk Import</h1>
-            <p className="text-hw-text-secondary text-sm mt-0.5">Import many cars at once from a file or paste</p>
+            <p className="text-hw-text-secondary text-sm mt-0.5">
+              Import many cars at once from a file or paste ·{' '}
+              <button onClick={() => navigate('/import')} className="text-hw-accent hover:underline">
+                importing a whole spreadsheet? try Import Sheet
+              </button>
+            </p>
           </div>
         </div>
 

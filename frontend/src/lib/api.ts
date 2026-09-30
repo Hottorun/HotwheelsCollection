@@ -391,3 +391,219 @@ export async function scrapeCar(url: string): Promise<ScrapedCar> {
 export async function toyNumberLookup(code: string): Promise<ScrapedCar[]> {
   return request<ScrapedCar[]>(`/api/toy-number/lookup?code=${encodeURIComponent(code)}`)
 }
+
+// ─── Sheet import ─────────────────────────────────────────────────────────────
+// The review queue for a spreadsheet import lives on the server (see
+// backend/importer.py), so these calls are about moving through it: fetch a
+// window of rows, ask for the next ones to be looked up ahead of time, then
+// approve, skip or undo one row at a time.
+
+export interface SheetRowData {
+  sheet: string
+  row_index: number
+  name: string
+  query: string
+  color: string
+  body: string
+  year?: number | null
+  year_raw: string
+  set_name: string
+  set_number?: number | null
+  set_total?: number | null
+  real_rider?: boolean | null
+  details: string
+  carded?: boolean | null
+  marker: string
+  treasure_hunt: boolean
+  super_treasure_hunt: boolean
+  other_brand?: string | null
+  multi_car: string[]
+  unidentified: boolean
+  duplicate_count: number
+  duplicate_rows: number[]
+}
+
+export interface ImportCandidate {
+  key: string
+  source: 'collection' | 'catalogue' | 'wiki'
+  car_id?: string | null
+  collection_id?: string | null
+  amount_owned?: number | null
+  name: string
+  year?: number | null
+  color?: string | null
+  series_name?: string | null
+  series_number?: number | null
+  series_total?: number | null
+  set_number?: number | null
+  toy_number?: string | null
+  car_type?: string | null
+  treasure_hunt?: boolean
+  image_url?: string | null
+  url?: string | null
+  score: number
+  reasons: string[]
+}
+
+export type ImportRowStatus = 'pending' | 'imported' | 'skipped' | 'already_done' | 'later'
+
+export interface ImportRow {
+  id: string
+  batch_id: string
+  sheet: string
+  row_index: number
+  position: number
+  raw: SheetRowData
+  marker: string
+  status: ImportRowStatus
+  candidates?: { items: ImportCandidate[]; query: string; fetched_at: string } | null
+  candidate_state: 'empty' | 'ready' | 'error'
+  match?: Record<string, unknown> | null
+  decided_at?: string | null
+}
+
+export interface ImportCounts {
+  total: number
+  pending: number
+  imported: number
+  skipped: number
+  later: number
+  already_done: number
+}
+
+export interface ImportSheetSummary extends ImportCounts {
+  sheet: string
+  amber: number
+  carded: boolean | null
+  first_position: number
+}
+
+export interface ImportBatch extends Partial<ImportCounts> {
+  id: string
+  source_name: string
+  created_at: string
+  sheets?: ImportSheetSummary[]
+  totals?: ImportCounts
+}
+
+export async function uploadSheet(file: File): Promise<ImportBatch> {
+  const formData = new FormData()
+  formData.append('file', file)
+  const token = getToken()
+  // Content-Type is left to the browser so it can add the multipart boundary.
+  const response = await fetch(`${API_BASE}/api/import/batches`, {
+    method: 'POST',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body: formData,
+  })
+  if (!response.ok) {
+    if (response.status === 401) handleExpired()
+    const err = await response.json().catch(() => ({ detail: 'Upload failed' }))
+    throw new Error(err.detail || `HTTP ${response.status}`)
+  }
+  return response.json()
+}
+
+export async function getImportBatches(): Promise<ImportBatch[]> {
+  return request<ImportBatch[]>('/api/import/batches')
+}
+
+export async function getImportBatch(id: string): Promise<ImportBatch> {
+  return request<ImportBatch>(`/api/import/batches/${id}`)
+}
+
+export async function deleteImportBatch(id: string): Promise<void> {
+  return request<void>(`/api/import/batches/${id}`, { method: 'DELETE' })
+}
+
+export async function setImportSheetCarded(
+  batchId: string,
+  sheet: string,
+  carded: boolean
+): Promise<ImportBatch> {
+  return request<ImportBatch>(
+    `/api/import/batches/${batchId}/sheets/${encodeURIComponent(sheet)}`,
+    { method: 'PATCH', body: JSON.stringify({ carded }) }
+  )
+}
+
+export async function getImportQueue(
+  batchId: string,
+  options: { sheet?: string; status?: string; afterPosition?: number; limit?: number } = {}
+): Promise<ImportRow[]> {
+  const params = new URLSearchParams()
+  if (options.sheet) params.set('sheet', options.sheet)
+  if (options.status) params.set('status', options.status)
+  if (options.afterPosition !== undefined) params.set('after_position', String(options.afterPosition))
+  params.set('limit', String(options.limit ?? 25))
+  return request<ImportRow[]>(`/api/import/batches/${batchId}/queue?${params}`)
+}
+
+/** Start the lookups for rows about to come up, so they are ready on arrival. */
+export async function prefetchImportRows(batchId: string, rowIds: string[]): Promise<void> {
+  if (!rowIds.length) return
+  await request<{ scheduled: number }>(`/api/import/batches/${batchId}/prefetch`, {
+    method: 'POST',
+    body: JSON.stringify({ row_ids: rowIds }),
+  })
+}
+
+export async function getImportCandidates(
+  rowId: string,
+  options: { q?: string; refresh?: boolean } = {}
+): Promise<{ items: ImportCandidate[]; query: string; fetched_at: string }> {
+  const params = new URLSearchParams()
+  if (options.q) params.set('q', options.q)
+  if (options.refresh) params.set('refresh', 'true')
+  const query = params.toString()
+  return request(`/api/import/rows/${rowId}/candidates${query ? `?${query}` : ''}`)
+}
+
+export interface ImportCommitPayload {
+  name: string
+  car_id?: string | null
+  candidate_key?: string | null
+  year?: number | null
+  primary_color?: string | null
+  series_name?: string | null
+  series_type?: string
+  series_number?: number | null
+  set_number?: number | null
+  toy_number?: string | null
+  car_type?: string | null
+  treasure_hunt?: boolean
+  image_url?: string | null
+  add_to_collection?: boolean
+  carded?: boolean
+  condition?: string
+  amount_owned?: number
+  notes?: string | null
+}
+
+export async function commitImportRow(
+  rowId: string,
+  payload: ImportCommitPayload
+): Promise<{ row: ImportRow; car: Car; collection_entry: CollectionEntry | null }> {
+  return request(`/api/import/rows/${rowId}/commit`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export async function setImportRowStatus(
+  rowId: string,
+  status: 'pending' | 'skipped' | 'already_done' | 'later'
+): Promise<ImportRow> {
+  return request<ImportRow>(`/api/import/rows/${rowId}/status`, {
+    method: 'POST',
+    body: JSON.stringify({ status }),
+  })
+}
+
+/** `deleted_car` says whether the car itself went too, which only happens when
+ *  this import created it and nothing else references it. */
+export async function undoImportRow(
+  rowId: string
+): Promise<ImportRow & { deleted_car?: boolean }> {
+  return request(`/api/import/rows/${rowId}/undo`, { method: 'POST' })
+}

@@ -12,6 +12,7 @@ import { WishlistPage } from './pages/WishlistPage'
 import { AnalyticsPage } from './pages/AnalyticsPage'
 import { DiscoverPage } from './pages/DiscoverPage'
 import { BulkAddPage } from './pages/BulkAddPage'
+import { SheetImportPage } from './pages/SheetImportPage'
 import { SeriesPage } from './pages/SeriesPage'
 import { AdminPage } from './pages/AdminPage'
 import { Spinner } from './components/Spinner'
@@ -70,6 +71,7 @@ function AppRoutes() {
         <Route path="/series" element={<SeriesPage />} />
         <Route path="/discover" element={<DiscoverPage />} />
         <Route path="/bulk-add" element={<BulkAddPage />} />
+        <Route path="/import" element={<SheetImportPage />} />
         <Route
           path="/admin"
           element={

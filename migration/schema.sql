@@ -101,3 +101,37 @@ CREATE TABLE IF NOT EXISTS wishlist (
 
 CREATE INDEX IF NOT EXISTS wishlist_user_id_idx    ON wishlist (user_id);
 CREATE INDEX IF NOT EXISTS wishlist_allcars_id_idx ON wishlist (allcars_id);
+
+-- ─── Spreadsheet import queues ───────────────────────────────────────────────
+-- Moving a 2,500-row Numbers sheet into the app is a few thousand small
+-- decisions, so the queue is stored rather than held in a browser tab: see
+-- backend/importer.py. Rows keep their parsed spreadsheet values, the candidates
+-- found for them, and what was done with them, so a session can be left and
+-- resumed. Existing databases get these from backend/migrations.py instead.
+
+CREATE TABLE IF NOT EXISTS import_batch (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    source_name text NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS import_row (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    batch_id        uuid NOT NULL REFERENCES import_batch (id) ON DELETE CASCADE,
+    user_id         uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    sheet           text NOT NULL,
+    row_index       integer NOT NULL,
+    position        integer NOT NULL,
+    raw             jsonb NOT NULL,
+    marker          text NOT NULL DEFAULT 'none',
+    status          text NOT NULL DEFAULT 'pending',
+    candidates      jsonb,
+    candidate_state text NOT NULL DEFAULT 'empty',
+    match           jsonb,
+    decided_at      timestamptz
+);
+
+CREATE INDEX IF NOT EXISTS import_row_batch_idx  ON import_row (batch_id, position);
+CREATE INDEX IF NOT EXISTS import_row_queue_idx  ON import_row (batch_id, status, position);
+CREATE INDEX IF NOT EXISTS import_batch_user_idx ON import_batch (user_id, created_at DESC);

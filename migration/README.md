@@ -387,6 +387,61 @@ as a fallback.
 
 ---
 
+## Importing the Numbers spreadsheet
+
+The collection lived in `myCarListExcel copy.numbers` for years, and **Import
+Sheet** in the sidebar is how it gets in. Drop the file in and it becomes a
+review queue: one car on screen at a time, the best match found for it, and Enter
+to approve. `?` lists the keys.
+
+The file is read directly rather than exported to CSV first, because the row
+colours are the record of what has already been done and a CSV export throws them
+away:
+
+| In the sheet | In the app |
+| --- | --- |
+| green row | already imported by hand — counted, kept out of the queue |
+| orange / red row | tried before and not found — queued, and flagged as such |
+| no fill (or white) | untouched — queued |
+
+It also reads, per row: the set name and its `3/5` number, real riders, TH and
+STH from the details column, carded-vs-loose from the sheet's *name* (Loose →
+loose, Packed → carded, changeable per sheet before you start), rows listing
+several cars (Team Transport), rows repeated on the same sheet, and the
+Matchbox / Majorette / Mini GT rows — those skip the wiki lookup, since it will
+never have them.
+
+Each approval is committed the moment it is made and the queue lives in Postgres
+(`import_batch`, `import_row`), so you can stop at any point and pick it up later
+— including from a different device. `U` undoes the last one, removing the car
+again if that approval created it and nothing else uses it.
+
+Nothing to configure. Two things worth knowing about the deployment:
+
+- The backend image needs rebuilding, for `numbers-parser` in
+  `requirements.txt`: `docker compose up -d --build backend frontend`.
+- The two tables are created at backend start by `backend/migrations.py`, so
+  there is no SQL step — `schema.sql` only covers a fresh database.
+
+**A note on the wiki lookups.** Fandom is behind Cloudflare, which currently
+answers `httpx` with a 403 while letting `urllib` through from the same address —
+it turns away the client fingerprint, not us. Since every lookup depends on those
+requests, they go through `UrllibClient` in `backend/main.py` instead. If matching
+ever comes back empty for everything, check that first:
+
+```bash
+docker compose exec backend python -c "
+import urllib.request
+print(urllib.request.urlopen(urllib.request.Request(
+    'https://hotwheels.fandom.com/api.php?action=query&list=search&srsearch=twin+mill&format=json',
+    headers={'User-Agent': 'HotWheelsTracker/1.0 (personal collection app)'}), timeout=15).status)"
+```
+
+`200` means lookups are fine. `403` means Cloudflare has moved on to blocking
+this path too, and the client needs another look.
+
+---
+
 ## Managing users
 
 `hottorun@pm.me` is an admin (set by `ADMIN_EMAIL` in `.env`). Admins get a

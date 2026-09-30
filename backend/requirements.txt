@@ -9,3 +9,6 @@ beautifulsoup4==4.14.3
 python-multipart==0.0.24
 pydantic==2.12.5
 pydantic-settings==2.13.1
+
+# Apple Numbers reader, for importing the collection spreadsheet directly.
+numbers-parser==4.19.0

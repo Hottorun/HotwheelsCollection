@@ -36,3 +36,7 @@ migration/export/
 
 # Database dumps written by the db-dump container
 backups/
+
+# The collection spreadsheet itself — personal data, keep it local
+*.numbers
+*.xlsx

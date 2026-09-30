@@ -14,6 +14,7 @@ import {
   Compass,
   Layers,
   Shield,
+  FileSpreadsheet,
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useTheme } from '../contexts/ThemeContext'
@@ -27,6 +28,7 @@ const navItems = [
   { to: '/discover', label: 'Discover', icon: Compass },
   { to: '/wishlist', label: 'Wishlist', icon: Heart },
   { to: '/analytics', label: 'Analytics', icon: BarChart3 },
+  { to: '/import', label: 'Import Sheet', icon: FileSpreadsheet },
 ]
 
 function Logo() {

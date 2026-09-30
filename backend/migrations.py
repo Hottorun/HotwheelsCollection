@@ -13,6 +13,7 @@ import logging
 import os
 
 import db
+import importer
 
 log = logging.getLogger("migrations")
 
@@ -23,6 +24,8 @@ STATEMENTS = [
     ALTER TABLE users
         ADD COLUMN IF NOT EXISTS is_admin boolean NOT NULL DEFAULT false
     """,
+    # Spreadsheet import queues — see backend/importer.py.
+    *importer.DDL,
 ]
 
 

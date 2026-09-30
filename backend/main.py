@@ -1,11 +1,15 @@
 import asyncio
+import gzip
 import io
+import json
 import os
 import re
+import urllib.error
+import urllib.request
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional, Literal
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -19,7 +23,9 @@ load_dotenv()
 
 import auth  # noqa: E402  — imported after load_dotenv so config is available
 import db  # noqa: E402
+import importer  # noqa: E402
 import migrations  # noqa: E402
+import sheet_import  # noqa: E402
 from auth import get_current_user  # noqa: E402
 
 @asynccontextmanager
@@ -32,6 +38,7 @@ async def lifespan(_app: FastAPI):
     # only runs when Postgres initialises an empty data directory.
     migrations.run()
     yield
+    await _close_wiki_client()
     db.close_pool()
 
 
@@ -407,8 +414,13 @@ def get_car(car_id: str, user=Depends(get_current_user)):
     return result
 
 
-@app.post("/api/cars", status_code=201)
-async def create_car(car: CarCreate, user=Depends(get_current_user)):
+async def _create_car_record(car: CarCreate) -> dict:
+    """Insert a catalogue car and mirror its image locally.
+
+    Shared by the create-car route and the sheet importer, so both get the same
+    image handling — the importer creates thousands of cars and every one of them
+    needs its wiki photo copied onto the NAS.
+    """
     new_car = db.insert("all_cars", car.model_dump(exclude_none=True))
 
     # Mirror externally-hosted images into local storage so the catalogue keeps
@@ -423,6 +435,11 @@ async def create_car(car: CarCreate, user=Depends(get_current_user)):
             pass  # non-critical — keep original URL as fallback
 
     return new_car
+
+
+@app.post("/api/cars", status_code=201)
+async def create_car(car: CarCreate, user=Depends(get_current_user)):
+    return await _create_car_record(car)
 
 
 @app.put("/api/cars/{car_id}")
@@ -1352,19 +1369,19 @@ async def scrape_feed(
     use_filters = any(v is not None and v != "" for v in [q, year, color, car_type])
 
     if not use_filters:
-        async with httpx.AsyncClient() as client:
+        async with _get_wiki_client() as client:
             pool = await _wiki_random(client, limit=max(n * 5, 50))
 
     elif year and not q and not color and not car_type:
         # Year-only: use wiki category — most reliable for year browsing
-        async with httpx.AsyncClient() as client:
+        async with _get_wiki_client() as client:
             pool = await _wiki_by_year(client, year, limit=max(n * 3, 30))
 
     elif q and not color and not car_type:
         # Name search: wiki search for reliable thumbnails + wiki URLs.
         # Wiki results are casting-level (no year field), so don't filter by year here —
         # the year filter is applied in the version detail view (pins matching versions to top).
-        async with httpx.AsyncClient() as client:
+        async with _get_wiki_client() as client:
             pool = await _wiki_search(client, q.strip(), limit=max(n * 3, 30))
             if not pool:
                 pool = await _chw_search_cached(client, q.strip())
@@ -1379,7 +1396,7 @@ async def scrape_feed(
         # Don't include year in CHW text query — it doesn't match year fields
         search_q = " ".join(query_parts) if query_parts else "hot wheels"
 
-        async with httpx.AsyncClient() as client:
+        async with _get_wiki_client() as client:
             pool = await _chw_search_cached(client, search_q)
 
         if year:
@@ -1398,7 +1415,7 @@ async def scrape_feed(
             if missing:
                 try:
                     names_to_lookup = list({c["name"] for c in missing if c.get("name")})[:10]
-                    async with httpx.AsyncClient() as client2:
+                    async with _get_wiki_client() as client2:
                         wiki_results: list[dict] = []
                         for name in names_to_lookup:
                             wr = await _wiki_search(client2, name, limit=1)
@@ -1472,7 +1489,7 @@ async def toy_number_lookup(code: str, user=Depends(get_current_user)):
     if len(code) < 3:
         raise HTTPException(status_code=400, detail="Code too short")
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    async with _get_wiki_client() as client:
         # Full-text wiki search — finds the "List of YYYY Hot Wheels" page that
         # contains this toy number in its table.
         try:
@@ -1510,7 +1527,7 @@ async def scrape_search(q: str, user=Depends(get_current_user)):
     if not q or len(q.strip()) < 2:
         return []
 
-    async with httpx.AsyncClient() as client:
+    async with _get_wiki_client() as client:
         results = await _wiki_search(client, q.strip(), limit=15)
 
     return results
@@ -1667,6 +1684,16 @@ def _parse_versions(soup: BeautifulSoup) -> list[dict]:
 @app.get("/api/scrape/car")
 async def scrape_car(url: str, user=Depends(get_current_user)):
     """Fetch structured car data from a Hot Wheels wiki page via the MediaWiki API."""
+    return await _wiki_car_detail(url)
+
+
+async def _wiki_car_detail(url: str) -> dict:
+    """The body of /api/scrape/car, callable in-process.
+
+    The sheet importer needs a casting page's version table for every row it
+    looks up; going back out through its own HTTP API to get it would cost a
+    round trip and an auth check per row.
+    """
     # Extract page name from URL: ".../wiki/Bone_Shaker" → "Bone_Shaker"
     page_name = unquote(urlparse(url).path.split("/wiki/")[-1])
     if not page_name:
@@ -1676,10 +1703,9 @@ async def scrape_car(url: str, user=Depends(get_current_user)):
         f"{WIKI_BASE}/api.php"
         f"?action=parse&page={quote(page_name)}&redirects=true&prop=text|categories&format=json"
     )
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(api_url, headers=HEADERS)
-        resp.raise_for_status()
-        data = resp.json()
+    resp = await _get_wiki_client().get(api_url, headers=HEADERS, timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
 
     if "error" in data:
         raise HTTPException(status_code=404, detail="Page not found on wiki")
@@ -1727,3 +1753,398 @@ async def scrape_car(url: str, user=Depends(get_current_user)):
     result["versions"] = _parse_versions(soup)
 
     return result
+
+
+# ─── Sheet import ─────────────────────────────────────────────────────────────
+# The collection was kept in a Numbers spreadsheet for years, and moving it in is
+# a few thousand judgement calls ("is this the blue 2015 one?") that no amount of
+# matching can make automatically. So the queue lives in Postgres and this API
+# serves it one row at a time: importer.py holds the state and the scoring, these
+# routes are the thin layer over it.
+
+MAX_SHEET_BYTES = 25 * 1024 * 1024
+
+
+class ImportSheetUpdate(BaseModel):
+    carded: bool
+
+
+class ImportPrefetch(BaseModel):
+    row_ids: list[str]
+
+
+class ImportStatusUpdate(BaseModel):
+    status: Literal["pending", "skipped", "already_done", "later"]
+
+
+class ImportCommit(BaseModel):
+    """One approved row. Everything is explicit: the review screen sends what is
+    on screen, including any edits, rather than the server re-deriving it."""
+    name: str
+    car_id: Optional[str] = None          # reuse a catalogue car instead of creating one
+    candidate_key: Optional[str] = None   # which card was approved, for the record
+    year: Optional[int] = None
+    primary_color: Optional[str] = None
+    series_name: Optional[str] = None
+    series_type: Literal["mainline", "premium", "collector"] = "mainline"
+    series_number: Optional[int] = None
+    set_number: Optional[int] = None
+    toy_number: Optional[str] = None
+    car_type: Optional[str] = None
+    treasure_hunt: bool = False
+    image_url: Optional[str] = None
+    add_to_collection: bool = True
+    carded: bool = True
+    condition: str = "mint"
+    amount_owned: int = 1
+    notes: Optional[str] = None
+
+
+class _UrllibResponse:
+    """The parts of an httpx response the wiki helpers actually use."""
+
+    __slots__ = ("status_code", "text")
+
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        return json.loads(self.text)
+
+    def raise_for_status(self) -> "_UrllibResponse":
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code} from the wiki")
+        return self
+
+
+class UrllibClient:
+    """A stand-in for httpx.AsyncClient that fetches through urllib.
+
+    Fandom sits behind Cloudflare, which currently answers httpx with 403 while
+    letting urllib through from the same machine and address — it is the client
+    fingerprint being turned away, not us. Since every lookup in the sheet
+    importer depends on those requests, the wiki calls go through urllib in a
+    worker thread instead. The interface matches the small part of httpx that the
+    wiki helpers use, so their code is unchanged.
+    """
+
+    def __init__(self, timeout: float = 20.0):
+        self._timeout = timeout
+
+    @property
+    def is_closed(self) -> bool:
+        return False
+
+    async def get(self, url: str, *, params=None, headers=None, timeout=None) -> _UrllibResponse:
+        if params:
+            url = f"{url}{'&' if '?' in url else '?'}{urlencode(params)}"
+        request = urllib.request.Request(url, headers=headers or HEADERS)
+        deadline = timeout or self._timeout
+
+        def fetch() -> _UrllibResponse:
+            try:
+                with urllib.request.urlopen(request, timeout=deadline) as response:
+                    body = response.read()
+                    if response.headers.get("Content-Encoding") == "gzip":
+                        body = gzip.decompress(body)
+                    return _UrllibResponse(response.status, body.decode("utf-8", "replace"))
+            except urllib.error.HTTPError as exc:
+                return _UrllibResponse(exc.code, exc.read().decode("utf-8", "replace"))
+
+        return await asyncio.to_thread(fetch)
+
+    async def aclose(self) -> None:
+        return None
+
+    # Usable as `async with`, like the httpx client it replaces — but leaving the
+    # block must not close it, since it is shared by every caller.
+    async def __aenter__(self) -> "UrllibClient":
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        return None
+
+
+# One client for wiki lookups, reused across the thousands the importer makes.
+_wiki_client: Optional[UrllibClient] = None
+
+
+def _get_wiki_client() -> UrllibClient:
+    global _wiki_client
+    if _wiki_client is None:
+        _wiki_client = UrllibClient()
+    return _wiki_client
+
+
+async def _close_wiki_client() -> None:
+    if _wiki_client is not None:
+        await _wiki_client.aclose()
+
+
+# Prefetch tasks outlive the request that started them, so they need a strong
+# reference here — without one the event loop can garbage-collect a task
+# mid-flight and the lookups silently stop happening.
+_background_tasks: set[asyncio.Task] = set()
+
+
+async def _import_search(q: str) -> list[dict]:
+    return await _wiki_search(_get_wiki_client(), q, limit=8)
+
+
+def _lookups() -> dict:
+    return {"search": _import_search, "detail": _wiki_car_detail}
+
+
+@app.post("/api/import/batches", status_code=201)
+async def import_upload(file: UploadFile = File(...), user=Depends(get_current_user)):
+    """Parse an uploaded sheet and open a review queue for it."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="That file is empty")
+    if len(data) > MAX_SHEET_BYTES:
+        raise HTTPException(status_code=413, detail="That file is larger than 25 MB")
+
+    filename = file.filename or "sheet"
+    try:
+        # Parsing a Numbers document is a second or two of CPU — off the event
+        # loop so it doesn't stall every other request in the meantime.
+        rows = await asyncio.to_thread(sheet_import.parse, data, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not read that file: {exc}")
+
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="No car rows found. The sheet needs a header row with at least a Name column.",
+        )
+
+    batch = importer.create_batch(user.id, filename, rows)
+    return importer.batch_summary(user.id, str(batch["id"]))
+
+
+@app.get("/api/import/batches")
+def import_list_batches(user=Depends(get_current_user)):
+    return importer.list_batches(user.id)
+
+
+@app.get("/api/import/batches/{batch_id}")
+def import_get_batch(batch_id: str, user=Depends(get_current_user)):
+    try:
+        batch = importer.batch_summary(user.id, batch_id)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Import not found")
+        raise
+    if not batch:
+        raise HTTPException(status_code=404, detail="Import not found")
+    return batch
+
+
+@app.delete("/api/import/batches/{batch_id}", status_code=204)
+def import_delete_batch(batch_id: str, user=Depends(get_current_user)):
+    """Closes the queue. Cars and collection entries already imported stay put."""
+    try:
+        deleted = importer.delete_batch(user.id, batch_id)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Import not found")
+        raise
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Import not found")
+
+
+@app.patch("/api/import/batches/{batch_id}/sheets/{sheet}")
+def import_update_sheet(
+    batch_id: str, sheet: str, body: ImportSheetUpdate, user=Depends(get_current_user)
+):
+    """Correct the carded/loose reading of a sheet, for rows not yet decided."""
+    if not importer.batch_summary(user.id, batch_id):
+        raise HTTPException(status_code=404, detail="Import not found")
+    importer.set_sheet_carded(user.id, batch_id, sheet, body.carded)
+    return importer.batch_summary(user.id, batch_id)
+
+
+@app.get("/api/import/batches/{batch_id}/queue")
+def import_queue(
+    batch_id: str,
+    sheet: Optional[str] = None,
+    status: str = "open",
+    after_position: Optional[int] = None,
+    limit: int = 25,
+    user=Depends(get_current_user),
+):
+    try:
+        if not importer.batch_summary(user.id, batch_id):
+            raise HTTPException(status_code=404, detail="Import not found")
+        return importer.queue(
+            user.id, batch_id,
+            sheet=sheet, status=status, after_position=after_position, limit=limit,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Import not found")
+        raise
+
+
+@app.post("/api/import/batches/{batch_id}/prefetch", status_code=202)
+async def import_prefetch(batch_id: str, body: ImportPrefetch, user=Depends(get_current_user)):
+    """Start looking up the rows the review screen is about to show.
+
+    Returns immediately; results land in the rows themselves, so the screen picks
+    them up on its next poll and the wait for row 40 already happened at row 30.
+    """
+    if not body.row_ids:
+        return {"scheduled": 0}
+    task = asyncio.create_task(
+        importer.prefetch_rows(user.id, body.row_ids[:40], **_lookups())
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return {"scheduled": len(body.row_ids[:40])}
+
+
+@app.get("/api/import/rows/{row_id}/candidates")
+async def import_candidates(
+    row_id: str,
+    q: Optional[str] = None,
+    refresh: bool = False,
+    user=Depends(get_current_user),
+):
+    """Candidates for one row, computed now if they aren't cached yet.
+
+    `q` re-runs the search with a different term — the sheet's own wording is
+    sometimes too far off to find anything ("?(build up car)").
+    """
+    try:
+        row = importer.get_row(user.id, row_id)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Row not found")
+        raise
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+
+    cached = row.get("candidates") or {}
+    if not refresh and not q and row["candidate_state"] == "ready":
+        return cached
+
+    query = (q or row["raw"].get("query") or "").strip()
+    try:
+        candidates = await importer.build_candidates(
+            user.id, row["raw"], query=q or None, **_lookups()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Lookup failed: {exc}")
+    importer.save_candidates(row_id, candidates, query)
+    return (importer.get_row(user.id, row_id) or {}).get("candidates") or {}
+
+
+@app.post("/api/import/rows/{row_id}/status")
+def import_set_status(row_id: str, body: ImportStatusUpdate, user=Depends(get_current_user)):
+    """Skip a row, park it for later, mark it done by hand, or put it back."""
+    try:
+        row = importer.set_status(user.id, row_id, body.status)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Row not found")
+        raise
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return row
+
+
+@app.post("/api/import/rows/{row_id}/commit")
+async def import_commit(row_id: str, body: ImportCommit, user=Depends(get_current_user)):
+    """Approve a row: add the car to the catalogue if needed, then to the collection.
+
+    Committing per row rather than in one pass at the end is what makes the queue
+    resumable — every decision is durable the moment it is made, and `undo` is
+    there for the ones that were wrong.
+    """
+    try:
+        row = importer.get_row(user.id, row_id)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Row not found")
+        raise
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+    if row["status"] == "imported":
+        raise HTTPException(status_code=409, detail="That row was already imported")
+
+    created_series_id: Optional[str] = None
+    created_car = False
+    car_id = body.car_id
+
+    if car_id:
+        car = db.query_one("SELECT * FROM all_cars WHERE id = %s", (car_id,))
+        if not car:
+            raise HTTPException(status_code=404, detail="Car not found")
+    else:
+        series_id: Optional[str] = None
+        if body.series_name:
+            series_id, was_created = importer.resolve_series(body.series_name, body.series_type)
+            if was_created:
+                created_series_id = series_id
+        car = await _create_car_record(CarCreate(
+            name=body.name.strip(),
+            series_id=series_id,
+            year=body.year,
+            toy_number=body.toy_number,
+            primary_color=body.primary_color,
+            set_number=body.set_number,
+            series_number=body.series_number,
+            image_url=body.image_url,
+            treasure_hunt=body.treasure_hunt,
+            car_type=body.car_type or ("treasure hunt" if body.treasure_hunt else body.series_type),
+        ))
+        car_id = str(car["id"])
+        created_car = True
+
+    match: dict = {
+        "car_id": car_id,
+        "created_car": created_car,
+        "created_series_id": created_series_id,
+        "candidate_key": body.candidate_key,
+    }
+
+    entry = None
+    if body.add_to_collection:
+        entry, amount_added, is_new = importer.add_or_increment_collection(user.id, car_id, {
+            "amount_owned": body.amount_owned,
+            "carded": body.carded,
+            "condition": body.condition,
+            "notes": body.notes,
+        })
+        match |= {
+            "collection_id": str(entry["id"]),
+            "amount_added": amount_added,
+            "created_collection_entry": is_new,
+        }
+
+    updated = importer.record_commit(row_id, match)
+    return {
+        "row": updated,
+        "car": db.query_one(f"{db.SELECT_CAR_WITH_SERIES} WHERE c.id = %s", (car_id,)),
+        "collection_entry": entry,
+    }
+
+
+@app.post("/api/import/rows/{row_id}/undo")
+def import_undo(row_id: str, user=Depends(get_current_user)):
+    """Take back the last approval: the collection entry goes, and so does the car
+    if this import created it and nothing else uses it."""
+    try:
+        row = importer.undo(user.id, row_id)
+    except Exception as exc:
+        if db.is_invalid_uuid(exc):
+            raise HTTPException(status_code=404, detail="Row not found")
+        raise
+    if not row:
+        raise HTTPException(status_code=404, detail="Row not found")
+    return row

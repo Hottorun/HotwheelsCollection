@@ -60,7 +60,7 @@ services:
       # the backend through the frontend container's proxy.
       - "${BACKEND_PORT:-8000}:8000"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -76,7 +76,13 @@ services:
     ports:
       - "${FRONTEND_PORT:-18080}:80"
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      # 127.0.0.1, not localhost: that name resolves to ::1 first inside the
+      # container, and this image serves IPv4 only — the nginx entrypoint skips
+      # its add-an-IPv6-listener patch because nginx.conf is ours, not the
+      # packaged one. Busybox wget tries the first address and stops, so the
+      # container reported unhealthy while serving traffic perfectly well. The
+      # backend escaped this only because curl falls through to the next address.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/ || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

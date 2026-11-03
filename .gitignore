@@ -43,3 +43,4 @@ backups/
 
 # Demo thumbnails are copied in from frontend/demo/images at build time
 frontend/public/images/
+.vercel

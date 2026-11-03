@@ -2,6 +2,7 @@ import { useState, FormEvent } from 'react'
 import { Navigate } from 'react-router-dom'
 import { Flame, Mail, Lock, ArrowRight, AlertCircle } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { DEMO } from '../lib/api'
 
 export function LoginPage() {
   const { user, signIn, loading } = useAuth()
@@ -67,7 +68,7 @@ export function LoginPage() {
               Hot Wheels <span className="text-gradient-accent">Tracker</span>
             </h1>
             <p className="text-hw-text-secondary text-sm mt-1">
-              Sign in to manage your collection
+              {DEMO ? 'Demo: any email and password will do' : 'Sign in to manage your collection'}
             </p>
           </div>
 

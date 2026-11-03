@@ -40,3 +40,6 @@ backups/
 # The collection spreadsheet itself — personal data, keep it local
 *.numbers
 *.xlsx
+
+# Demo thumbnails are copied in from frontend/demo/images at build time
+frontend/public/images/

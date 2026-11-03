@@ -5,8 +5,8 @@ import React, {
   useState,
   useCallback,
 } from 'react'
-import { fetchMe, login as apiLogin, logout as apiLogout, type AuthUser } from '../lib/api'
-import { getToken, setExpiredHandler } from '../lib/session'
+import { DEMO, fetchMe, login as apiLogin, logout as apiLogout, type AuthUser } from '../lib/api'
+import { getToken, setToken, setExpiredHandler } from '../lib/session'
 
 interface AuthContextValue {
   user: AuthUser | null
@@ -23,6 +23,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let cancelled = false
+
+    // The demo has no accounts, so visitors land straight in the collection.
+    if (DEMO && !getToken()) setToken('demo')
 
     // A token in storage is only a hint — it may be expired or its account
     // deleted, so confirm it against the backend before treating it as a session.

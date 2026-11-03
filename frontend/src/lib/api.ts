@@ -15,6 +15,9 @@ import type {
 // here, and `||` would wrongly fall through to localhost.
 export const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000'
 
+/** The public demo build answers from an in-memory snapshot instead (see demo.ts). */
+export const DEMO = import.meta.env.VITE_DEMO === 'true'
+
 /**
  * Car images are stored on the NAS and come back as a root-relative path
  * ("/images/<id>.jpg") rather than an absolute URL, because the NAS answers on
@@ -42,6 +45,8 @@ async function request<T>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
+  if (DEMO) return (await import('./demo')).demoRequest<T>(path, options)
+
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
@@ -71,6 +76,10 @@ export interface AuthUser {
 }
 
 export async function login(email: string, password: string): Promise<AuthUser> {
+  if (DEMO) {
+    setToken('demo')
+    return (await import('./demo')).DEMO_USER
+  }
   const response = await fetch(`${API_BASE}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -298,6 +307,7 @@ export async function lookupBarcode(barcode: string): Promise<BarcodeResult> {
 // ─── Image Upload ─────────────────────────────────────────────────────────────
 
 export async function uploadCarImage(carId: string, file: File): Promise<{ image_url: string }> {
+  if (DEMO) return (await import('./demo')).notInDemo()
   const formData = new FormData()
   formData.append('file', file)
   const token = getToken()
@@ -487,6 +497,7 @@ export interface ImportBatch extends Partial<ImportCounts> {
 }
 
 export async function uploadSheet(file: File): Promise<ImportBatch> {
+  if (DEMO) return (await import('./demo')).notInDemo()
   const formData = new FormData()
   formData.append('file', file)
   const token = getToken()

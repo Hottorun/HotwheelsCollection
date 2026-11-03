@@ -1,4 +1,5 @@
 {
+  "buildCommand": "cp -R demo/images public/images && tsc && vite build --mode demo",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]

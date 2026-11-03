@@ -17,6 +17,7 @@ import {
   FileSpreadsheet,
 } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { DEMO } from '../lib/api'
 import { useTheme } from '../contexts/ThemeContext'
 import { SearchBar } from './SearchBar'
 import { useSearch } from '../contexts/SearchContext'
@@ -215,6 +216,11 @@ export function Layout() {
         )}
 
         <main className="flex-1 overflow-y-auto">
+          {DEMO && (
+            <div className="px-4 py-2 text-xs text-hw-text-secondary bg-hw-accent/10 border-b border-hw-border">
+              Demo with a snapshot of my collection. Changes stay in this tab and reset on reload.
+            </div>
+          )}
           <Outlet />
         </main>
 
